@@ -369,11 +369,11 @@ void DrawMenuGlyph(HDC dc, int kind, int x, int y, const PopupState& p, COLORREF
 HFONT CreateSystemMenuFont(UINT dpi) {
     NONCLIENTMETRICSW metrics{};
     metrics.cbSize = sizeof(metrics);
-    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0)) {
-        LOGFONTW font = metrics.lfMenuFont;
-        font.lfHeight = MulDiv(font.lfHeight, static_cast<int>(dpi), 96);
-        return CreateFontIndirectW(&font);
-    }
+    if (SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics),
+                                   &metrics, 0, dpi))
+        return CreateFontIndirectW(&metrics.lfMenuFont);
+    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0))
+        return CreateFontIndirectW(&metrics.lfMenuFont);
     return CreateFontW(-MulDiv(15, static_cast<int>(dpi), 96), 0, 0, 0, FW_NORMAL,
                        FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0,
                        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
