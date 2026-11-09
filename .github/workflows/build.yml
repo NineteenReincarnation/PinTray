@@ -1,0 +1,48 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build
+        run: dotnet build src/PinTray/PinTray.csproj -c Release -p:Platform=x64
+
+      - name: Publish portable self-contained build
+        run: dotnet publish src/PinTray/PinTray.csproj -c Release -r win-x64 --self-contained true -p:Platform=x64 -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o artifacts/publish
+
+      - name: Upload portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: PinTray-portable-win-x64
+          path: artifacts/publish/
+          if-no-files-found: error
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress --yes
+
+      - name: Build per-user installer
+        shell: pwsh
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\PinTray.iss'
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: PinTray-installer-win-x64
+          path: artifacts/installer/*.exe
+          if-no-files-found: error

@@ -1,0 +1,15 @@
+# Visual Studio / .NET
+bin/
+obj/
+.vs/
+*.user
+*.suo
+TestResults/
+artifacts/
+*.msix
+*.msixbundle
+*.msixupload
+*.appx
+*.appxbundle
+*.pfx
+*.cer
