@@ -4,7 +4,7 @@ using PinTray.Services;
 
 namespace PinTray;
 
-public partial class App : Application
+public partial class App : System.Windows.Application
 {
     private Mutex? _singleInstance;
     private TrayController? _tray;
@@ -30,8 +30,8 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"PinTray could not start:\n{ex.Message}", "PinTray",
-                MessageBoxButton.OK, MessageBoxImage.Error);
+            System.Windows.MessageBox.Show($"PinTray could not start:\n{ex.Message}", "PinTray",
+                System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
             Shutdown(1);
         }
     }

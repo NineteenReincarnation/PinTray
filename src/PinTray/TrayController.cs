@@ -22,7 +22,7 @@ public sealed class TrayController : IDisposable
     private ForegroundTracker? _foreground;
     private GlobalHotkeyService? _hotkeys;
     private Forms.NotifyIcon? _tray;
-    private ContextMenu? _menu;
+    private System.Windows.Controls.ContextMenu? _menu;
     private SettingsWindow? _settingsWindow;
     private bool _disposed;
 
@@ -59,7 +59,7 @@ public sealed class TrayController : IDisposable
         if (_menu != null)
             _menu.IsOpen = false;
 
-        var menu = new ContextMenu
+        var menu = new System.Windows.Controls.ContextMenu
         {
             Placement = PlacementMode.MousePoint,
             FontFamily = new System.Windows.Media.FontFamily("Segoe UI Variable"),
@@ -80,19 +80,19 @@ public sealed class TrayController : IDisposable
             .ToList();
 
         menu.Items.Add(new Separator());
-        var heading = new MenuItem { Header = "窗口列表", IsEnabled = false };
+        var heading = new System.Windows.Controls.MenuItem { Header = "窗口列表", IsEnabled = false };
         menu.Items.Add(heading);
 
         if (windows.Count == 0)
         {
-            menu.Items.Add(new MenuItem { Header = "没有可操作的窗口", IsEnabled = false });
+            menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "没有可操作的窗口", IsEnabled = false });
         }
         else
         {
             foreach (WindowEntry window in windows)
             {
                 nint handle = window.Handle;
-                var item = new MenuItem
+                var item = new System.Windows.Controls.MenuItem
                 {
                     Header = Shorten(window.Title, 38),
                     ToolTip = window.Title,
@@ -105,7 +105,7 @@ public sealed class TrayController : IDisposable
         }
 
         menu.Items.Add(new Separator());
-        var clearPins = new MenuItem
+        var clearPins = new System.Windows.Controls.MenuItem
         {
             Header = "取消全部由 PinTray 设置的置顶",
             IsEnabled = _pins.OwnedPinCount > 0
@@ -125,9 +125,9 @@ public sealed class TrayController : IDisposable
         menu.IsOpen = true;
     }
 
-    private static void AddAction(ContextMenu menu, string label, Action action)
+    private static void AddAction(System.Windows.Controls.ContextMenu menu, string label, Action action)
     {
-        var item = new MenuItem { Header = label };
+        var item = new System.Windows.Controls.MenuItem { Header = label };
         item.Click += (_, _) => action();
         menu.Items.Add(item);
     }

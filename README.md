@@ -2,7 +2,7 @@
 
 **PinTray** is a small Windows 11 utility that keeps selected windows always on top. It lives in the notification area, stays out of your way, and uses the native Windows topmost API.
 
-> **Development preview: 0.1.0** · Not yet submitted to Microsoft Store.
+> **Development preview: 0.1.1** · Not yet submitted to Microsoft Store.
 
 ## Features
 
@@ -22,7 +22,7 @@ PinTray 是一款轻量级的 Windows 11 窗口置顶工具。启动后常驻系
 - 默认快捷键：**Ctrl + Alt + P**；可在设置中修改。它与 PowerToys 常用的 Win + Ctrl + T 避免了默认冲突。
 - 默认注册当前用户开机启动；设置中可关闭。
 - 退出时只取消 PinTray 本次运行所设置的置顶状态。
-- 目前是 **0.1.0 开发预览版**，尚未符合微软商店正式发布标准。
+- 目前是 **0.1.1 开发预览版**，尚未符合微软商店正式发布标准。
 
 ## Requirements
 

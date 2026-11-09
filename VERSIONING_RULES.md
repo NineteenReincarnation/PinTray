@@ -11,4 +11,4 @@ Format: `X.Y.Z` (non-negative integers; not SemVer).
 - Read the current project version first. Keep active version references consistent; preserve historical versions.
 
 PinTray-specific release gate: keep `X = 0` during development. Change `X` to `1` only after the owner explicitly confirms that PinTray is ready to publish to Microsoft Store.
-Current initial development version: `0.1.0`.
+Current development version: `0.1.1`.
