@@ -604,6 +604,228 @@ void ShowMenu() {
     SetFocus(hwnd);
 }
 
+// Lightweight, non-activating pin buttons owned by their target windows.
+// An owned popup stays above its window without floating above unrelated windows.
+struct BadgeEntry {
+    HWND target = nullptr;
+    DWORD pid = 0;
+    HWND badge = nullptr;
+};
+std::vector<BadgeEntry> g_badges;
+HWINEVENTHOOK g_badgeHooks[4]{};
+bool g_badgeRefreshQueued = false;
+constexpr wchar_t kBadgeClass[] = L"PinTray.WindowBadge";
+constexpr COLORREF kBadgeTransparency = RGB(255, 0, 255);
+
+void RequestBadgeRefresh() {
+    if (!g_hwnd || g_badgeRefreshQueued) return;
+    g_badgeRefreshQueued = PostMessageW(g_hwnd, kBadgeSync, 0, 0) != FALSE;
+}
+
+bool IsBadgeEligible(HWND target, DWORD* processId = nullptr, RECT* bounds = nullptr) {
+    if (!DescribeWindow(target) || IsIconic(target)) return false;
+    const LONG_PTR style = GetWindowLongPtrW(target, GWL_STYLE);
+    if (!(style & WS_CAPTION)) return false;
+    RECT rect{};
+    if (FAILED(DwmGetWindowAttribute(target, DWMWA_EXTENDED_FRAME_BOUNDS,
+                                    &rect, sizeof(rect))) && !GetWindowRect(target, &rect))
+        return false;
+    if (rect.right - rect.left < 220 || rect.bottom - rect.top < 70) return false;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(target, &pid);
+    if (processId) *processId = pid;
+    if (bounds) *bounds = rect;
+    return true;
+}
+
+bool IsTrackedPin(HWND target, DWORD pid) {
+    return std::any_of(g_ownedPins.begin(), g_ownedPins.end(),
+        [target, pid](const PinState& p) { return p.hwnd == target && p.pid == pid; });
+}
+
+void DrawBadge(HWND hwnd) {
+    PAINTSTRUCT ps{};
+    HDC dc = BeginPaint(hwnd, &ps);
+    if (!dc) return;
+    RECT rect{};
+    GetClientRect(hwnd, &rect);
+    const int size = rect.right;
+    HBRUSH transparent = CreateSolidBrush(kBadgeTransparency);
+    FillRect(dc, &rect, transparent);
+    DeleteObject(transparent);
+
+    HWND target = reinterpret_cast<HWND>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    const bool pinned = IsWindow(target) && (GetWindowLongPtrW(target, GWL_EXSTYLE) & WS_EX_TOPMOST);
+    const bool dark = UseDarkMenu();
+    const COLORREF face = pinned ? RGB(15, 127, 201) : dark ? RGB(54, 54, 54) : RGB(245, 245, 245);
+    const COLORREF stroke = pinned ? RGB(35, 161, 231) : dark ? RGB(118, 118, 118) : RGB(160, 160, 160);
+    const COLORREF glyph = pinned ? RGB(255, 255, 255) : dark ? RGB(234, 234, 234) : RGB(46, 46, 46);
+    const int margin = std::max(1, size / 18);
+
+    HBRUSH brush = CreateSolidBrush(face);
+    HPEN outline = CreatePen(PS_SOLID, std::max(1, size / 20), stroke);
+    HGDIOBJ oldBrush = SelectObject(dc, brush);
+    HGDIOBJ oldPen = SelectObject(dc, outline);
+    RoundRect(dc, margin, margin, size - margin, size - margin, size / 3, size / 3);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(brush);
+    DeleteObject(outline);
+
+    HPEN pinPen = CreatePen(PS_SOLID, std::max(2, size / 12), glyph);
+    oldPen = SelectObject(dc, pinPen);
+    auto line = [&](int x1, int y1, int x2, int y2) {
+        MoveToEx(dc, size * x1 / 100, size * y1 / 100, nullptr);
+        LineTo(dc, size * x2 / 100, size * y2 / 100);
+    };
+    // Simple pin silhouette with no unnecessary interior detail.
+    line(35, 30, 65, 30);
+    line(40, 30, 40, 50);
+    line(60, 30, 60, 50);
+    line(30, 55, 70, 55);
+    line(50, 55, 50, 79);
+    if (pinned) line(42, 72, 58, 72);
+    SelectObject(dc, oldPen);
+    DeleteObject(pinPen);
+    EndPaint(hwnd, &ps);
+}
+
+LRESULT CALLBACK BadgeWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    case WM_ERASEBKGND:
+        return TRUE;
+    case WM_PAINT:
+        DrawBadge(hwnd);
+        return 0;
+    case WM_LBUTTONUP: {
+        HWND target = reinterpret_cast<HWND>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (TogglePin(target)) RefreshTooltip();
+        RequestBadgeRefresh();
+        return 0;
+    }
+    case WM_SETCURSOR:
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        return TRUE;
+    default:
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+}
+
+void RefreshBadges() {
+    g_badgeRefreshQueued = false;
+    const size_t initialPinCount = g_ownedPins.size();
+    std::erase_if(g_ownedPins, [](const PinState& p) {
+        DWORD pid = 0;
+        return !IsWindow(p.hwnd) || !GetWindowThreadProcessId(p.hwnd, &pid) ||
+               pid != p.pid || !(GetWindowLongPtrW(p.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST);
+    });
+    if (g_ownedPins.size() != initialPinCount) RefreshTooltip();
+
+    // Keep badges for windows pinned by PinTray plus the current ordinary window.
+    // Only the active unpinned window gets a temporary badge.
+    std::vector<std::pair<HWND, DWORD>> targets;
+    targets.reserve(g_ownedPins.size() + 1);
+    for (const auto& p : g_ownedPins) {
+        if (IsBadgeEligible(p.hwnd)) targets.push_back({p.hwnd, p.pid});
+    }
+    HWND active = GetForegroundWindow();
+    DWORD activePid = 0;
+    if (IsBadgeEligible(active, &activePid) &&
+        !IsTrackedPin(active, activePid)) targets.push_back({active, activePid});
+
+    std::erase_if(g_badges, [&](const BadgeEntry& badge) {
+        const bool keep = IsWindow(badge.badge) &&
+            std::any_of(targets.begin(), targets.end(), [&](const auto& entry) {
+                return entry.first == badge.target && entry.second == badge.pid;
+            });
+        if (!keep && IsWindow(badge.badge)) DestroyWindow(badge.badge);
+        return !keep;
+    });
+
+    for (const auto& [target, pid] : targets) {
+        RECT rect{};
+        if (!IsBadgeEligible(target, nullptr, &rect)) continue;
+        UINT dpi = GetDpiForWindow(target);
+        if (!dpi) dpi = 96;
+        const int size = std::max(22, MulDiv(28, dpi, 96));
+        // Leave the system's minimize/maximize/close buttons unobstructed.
+        const int captionButtons = 3 * GetSystemMetricsForDpi(SM_CXSIZE, dpi);
+        const int x = std::max(rect.left + MulDiv(52, dpi, 96),
+            rect.right - captionButtons - size - MulDiv(12, dpi, 96));
+        const int y = rect.top + MulDiv(5, dpi, 96);
+        auto found = std::find_if(g_badges.begin(), g_badges.end(),
+            [target, pid](const BadgeEntry& p) { return p.target == target && p.pid == pid; });
+        if (found == g_badges.end()) {
+            HWND badge = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
+                kBadgeClass, L"", WS_POPUP, x, y, size, size, target, nullptr, g_instance, nullptr);
+            if (!badge) continue;
+            SetWindowLongPtrW(badge, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(target));
+            SetLayeredWindowAttributes(badge, kBadgeTransparency, 0, LWA_COLORKEY);
+            g_badges.push_back({target, pid, badge});
+            SetWindowPos(badge, nullptr, x, y, size, size,
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+        } else {
+            RECT current{};
+            if (!GetWindowRect(found->badge, &current) ||
+                current.left != x || current.top != y ||
+                current.right - current.left != size || current.bottom - current.top != size) {
+                SetWindowPos(found->badge, nullptr, x, y, size, size,
+                    SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+            }
+            InvalidateRect(found->badge, nullptr, FALSE);
+        }
+    }
+}
+
+void CALLBACK OnBadgeWindowEvent(HWINEVENTHOOK, DWORD event, HWND target,
+                                  LONG object, LONG child, DWORD, DWORD) {
+    if (event == EVENT_SYSTEM_FOREGROUND) {
+        RequestBadgeRefresh();
+        return;
+    }
+    if (object != OBJID_WINDOW || child != CHILDID_SELF || !target) return;
+    if (target == GetForegroundWindow() ||
+        std::any_of(g_badges.begin(), g_badges.end(),
+            [target](const BadgeEntry& badge) { return badge.target == target; }) ||
+        std::any_of(g_ownedPins.begin(), g_ownedPins.end(),
+            [target](const PinState& p) { return p.hwnd == target; })) {
+        RequestBadgeRefresh();
+    }
+}
+
+void InitializeBadges() {
+    WNDCLASSEXW cls{};
+    cls.cbSize = sizeof(cls);
+    cls.hInstance = g_instance;
+    cls.lpfnWndProc = BadgeWindowProc;
+    cls.hCursor = LoadCursorW(nullptr, IDC_HAND);
+    cls.lpszClassName = kBadgeClass;
+    if (!RegisterClassExW(&cls)) return;
+    constexpr UINT flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
+    g_badgeHooks[0] = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+                                      nullptr, OnBadgeWindowEvent, 0, 0, flags);
+    g_badgeHooks[1] = SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND,
+                                      nullptr, OnBadgeWindowEvent, 0, 0, flags);
+    g_badgeHooks[2] = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE,
+                                      nullptr, OnBadgeWindowEvent, 0, 0, flags);
+    g_badgeHooks[3] = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
+                                      nullptr, OnBadgeWindowEvent, 0, 0, flags);
+    RequestBadgeRefresh();
+}
+
+void ShutdownBadges() {
+    for (auto& hook : g_badgeHooks) {
+        if (hook) { UnhookWinEvent(hook); hook = nullptr; }
+    }
+    for (const auto& badge : g_badges) {
+        if (IsWindow(badge.badge)) DestroyWindow(badge.badge);
+    }
+    std::vector<BadgeEntry>().swap(g_badges);
+    g_badgeRefreshQueued = false;
+}
+
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == g_taskbarCreated && msg != 0) { AddTrayIcon(); return 0; }
     switch (msg) {
@@ -616,10 +838,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_HOTKEY:
         if (static_cast<UINT>(wParam) == g_hotkeyId) {
             if (TogglePin(GetForegroundWindow())) RefreshTooltip();
+            RequestBadgeRefresh();
         }
+        return 0;
+    case kBadgeSync:
+        RefreshBadges();
         return 0;
     case WM_DESTROY:
         if (g_popup) DestroyWindow(g_popup->hwnd);
+        ShutdownBadges();
         ClearOwnedPins();
         RemoveTrayIcon();
         if (g_hotkeyId) UnregisterHotKey(hwnd, static_cast<int>(g_hotkeyId));
@@ -659,6 +886,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         // The tray remains usable even when all shortcuts are taken.
     }
     if (!AddTrayIcon()) { DestroyWindow(g_hwnd); CloseHandle(g_mutex); return 1; }
+    InitializeBadges();
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
