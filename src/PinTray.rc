@@ -4,8 +4,8 @@ IDI_PINTRAY ICON "assets\\PinTray.ico"
 1 24 "src\\app.manifest"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,2,2,0
- PRODUCTVERSION 0,2,2,0
+ FILEVERSION 0,3,3,0
+ PRODUCTVERSION 0,3,3,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -18,11 +18,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "NineteenReincarnation\0"
             VALUE "FileDescription", "PinTray window pinning utility\0"
-            VALUE "FileVersion", "0.2.2\0"
+            VALUE "FileVersion", "0.3.3\0"
             VALUE "InternalName", "PinTray\0"
             VALUE "OriginalFilename", "PinTray.exe\0"
             VALUE "ProductName", "PinTray\0"
-            VALUE "ProductVersion", "0.2.2\0"
+            VALUE "ProductVersion", "0.3.3\0"
         END
     END
     BLOCK "VarFileInfo"

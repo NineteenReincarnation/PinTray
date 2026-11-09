@@ -45,3 +45,45 @@ jobs:
           name: PinTray-installer-win-x64
           path: artifacts/installer/*.exe
           if-no-files-found: error
+  
+  release:
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      startsWith(github.event.head_commit.message, 'release: PinTray ')
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download portable build
+        uses: actions/download-artifact@v4
+        with:
+          name: PinTray-portable-win-x64
+          path: artifacts/portable
+
+      - name: Download installer
+        uses: actions/download-artifact@v4
+        with:
+          name: PinTray-installer-win-x64
+          path: artifacts/installer
+
+      - name: Publish GitHub prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = 'artifacts/portable/PinTray.exe'
+          $version = (Get-Item $exe).VersionInfo.ProductVersion.Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+
+) { throw "Invalid project version: $version" }
+          $installer = "artifacts/installer/PinTray-Setup-$version-win-x64.exe"
+          $portable = "artifacts/PinTray-Portable-$version-win-x64.exe"
+          if (!(Test-Path $installer)) { throw "Installer version doesn't match executable: $version" }
+          Copy-Item $exe $portable
+          gh release create "v$version" $installer $portable --title "PinTray $version" --notes-file ".github/RELEASE_NOTES.md" --prerelease --target $env:GITHUB_SHA
+
