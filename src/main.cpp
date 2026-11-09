@@ -386,7 +386,7 @@ void PlacePopup(PopupState& p) {
     const int top = static_cast<int>(work.top);
     const int right = static_cast<int>(work.right);
     const int bottom = static_cast<int>(work.bottom);
-    int x = std::clamp(p.anchor.x - Scale(p, 48), left,
+    int x = std::clamp(static_cast<int>(p.anchor.x) - Scale(p, 48), left,
                        std::max(left, right - p.width));
     int y = (p.anchor.y + p.height + offset <= bottom)
         ? p.anchor.y + offset : p.anchor.y - p.height - offset;
