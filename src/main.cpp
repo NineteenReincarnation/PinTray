@@ -293,7 +293,7 @@ void LayoutPopup(PopupState& p) {
             SIZE measured{};
             if (GetTextExtentPoint32W(dc, row.label.c_str(),
                                       static_cast<int>(row.label.size()), &measured))
-                p.width = std::max(p.width, measured.cx + Scale(p, 112));
+                p.width = std::max(p.width, static_cast<int>(measured.cx) + Scale(p, 112));
         }
         if (old) SelectObject(dc, old);
         ReleaseDC(nullptr, dc);
