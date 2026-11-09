@@ -437,7 +437,6 @@ int PopupHitTest(const PopupState& p, POINT point) {
 
 void SwitchPopupPage(PopupState& p, MenuPage page) {
     p.page = page;
-    p.scroll = 0;
     BuildPopupRows(p);
     LayoutPopup(p);
     PlacePopup(p);
