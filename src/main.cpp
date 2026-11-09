@@ -461,9 +461,9 @@ bool GetEdgeBadgeRect(HWND target, RECT& placement) {
 
     int x = frame.right - side / 2; // half outside the right window edge
     if (x + side > monitor.rcWork.right - margin)
-        x = std::min(frame.right - side - margin,
+        x = std::min(static_cast<int>(frame.right) - side - margin,
                      static_cast<int>(monitor.rcWork.right) - side - margin);
-    int y = std::max(frame.top + upperOffset,
+    int y = std::max(static_cast<int>(frame.top) + upperOffset,
                      static_cast<int>(monitor.rcWork.top) + margin);
     if (x < visible.left || y + side > visible.bottom - margin)
         return false;
