@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cwchar>
 #include <windowsx.h>
+#include "i18n.h"
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -55,6 +56,7 @@ int g_hotkeyChoice = -1;
 bool g_autostart = true;
 bool g_packaged = false;
 std::vector<PinState> g_ownedPins;
+PinTrayLocale::Text g_text = PinTrayLocale::ForLanguage(L"en");
 
 bool IsPackaged() {
     UINT32 length = 0;
@@ -257,13 +259,13 @@ void BuildPopupRows(PopupState& p) {
     p.rows.clear();
     p.hover = -1;
     if (p.page == MenuPage::Main) {
-        AddMenuRow(p, L"快捷键", kMenuShortcuts, GlyphKeyboard, false, true);
+        AddMenuRow(p, g_text.shortcuts, kMenuShortcuts, GlyphKeyboard, false, true);
         MenuSeparator(p);
-        AddMenuRow(p, L"开机自启", kMenuAutostart, GlyphStartup, g_autostart, false, g_packaged);
+        AddMenuRow(p, g_text.startup, kMenuAutostart, GlyphStartup, g_autostart, false, g_packaged);
         MenuSeparator(p);
-        AddMenuRow(p, L"退出", kMenuExit, GlyphExit);
+        AddMenuRow(p, g_text.quit, kMenuExit, GlyphExit);
     } else {
-        AddMenuRow(p, L"快捷键", kMenuBack, GlyphBack);
+        AddMenuRow(p, g_text.shortcuts, kMenuBack, GlyphBack);
         for (size_t i = 0; i < std::size(kHotkeys); ++i) {
             AddMenuRow(p, kHotkeys[i].label, kHotkeyMenuBase + static_cast<UINT>(i),
                        GlyphKeyboard, g_hotkeyChoice == static_cast<int>(i));
@@ -463,7 +465,7 @@ void RunPopupAction(PopupState& p, int visibleIndex) {
     if (row.action == kMenuExit) DestroyWindow(g_hwnd);
     else if (row.action >= kHotkeyMenuBase && row.action < kHotkeyMenuBase + std::size(kHotkeys)) {
         if (!ChangeHotkey(static_cast<int>(row.action - kHotkeyMenuBase)))
-            MessageBoxW(nullptr, L"该快捷键已被占用。", L"PinTray",
+            MessageBoxW(nullptr, g_text.occupied, L"PinTray",
                         MB_OK | MB_ICONINFORMATION);
     }
 }
@@ -843,6 +845,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (action == WM_CONTEXTMENU) ShowMenu();
         return 0;
     }
+    case WM_SETTINGCHANGE:
+    case WM_THEMECHANGED:
+        g_text = PinTrayLocale::Detect();
+        if (g_popup) {
+            g_popup->dark = UseDarkMenu();
+            BuildPopupRows(*g_popup);
+            LayoutPopup(*g_popup);
+            PlacePopup(*g_popup);
+            InvalidateRect(g_popup->hwnd, nullptr, FALSE);
+        }
+        RequestBadgeRefresh();
+        return 0;
     case WM_HOTKEY:
         if (static_cast<UINT>(wParam) == g_hotkeyId) {
             if (TogglePin(GetForegroundWindow())) RefreshTooltip();
@@ -869,6 +883,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_instance = instance;
+    g_text = PinTrayLocale::Detect();
     g_mutex = CreateMutexW(nullptr, TRUE, L"Local\\NineteenReincarnation.PinTray.Singleton");
     if (!g_mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
         if (g_mutex) CloseHandle(g_mutex);
