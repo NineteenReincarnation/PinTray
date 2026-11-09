@@ -37,7 +37,7 @@ constexpr UINT kMenuExit = 3003;
 constexpr UINT kHotkeyIdA = 50;
 constexpr UINT kHotkeyIdB = 51;
 
-struct WindowEntry { HWND hwnd; DWORD pid; std::wstring title; bool topmost; };
+struct WindowEntry { HWND hwnd; DWORD pid; bool topmost; };
 struct PinState { HWND hwnd; DWORD pid; };
 struct HotkeyChoice { UINT mods; UINT key; const wchar_t* label; };
 constexpr HotkeyChoice kHotkeys[] = {
@@ -134,13 +134,7 @@ bool DescribeWindow(HWND hwnd, WindowEntry* out = nullptr) {
     if (pid == GetCurrentProcessId()) return false;
     int length = GetWindowTextLengthW(hwnd);
     if (length <= 0) return false;
-    if (out) {
-        std::wstring title(static_cast<size_t>(length) + 1, L'\0');
-        int read = GetWindowTextW(hwnd, title.data(), static_cast<int>(title.size()));
-        if (read <= 0) return false;
-        title.resize(static_cast<size_t>(read));
-        *out = {hwnd, pid, std::move(title), (style & WS_EX_TOPMOST) != 0};
-    }
+    if (out) *out = {hwnd, pid, (style & WS_EX_TOPMOST) != 0};
     return true;
 }
 
@@ -652,7 +646,7 @@ struct BadgeEntry {
     bool hover = false;
 };
 std::vector<BadgeEntry> g_badges;
-HWINEVENTHOOK g_badgeHooks[5]{};
+HWINEVENTHOOK g_badgeHooks[6]{};
 bool g_badgeRefreshQueued = false;
 constexpr wchar_t kBadgeClass[] = L"PinTray.WindowBadge";
 constexpr COLORREF kBadgeTransparency = RGB(255, 0, 255);
@@ -662,25 +656,17 @@ void RequestBadgeRefresh() {
     g_badgeRefreshQueued = PostMessageW(g_hwnd, kBadgeSync, 0, 0) != FALSE;
 }
 
-bool IsBadgeEligible(HWND target, DWORD* processId = nullptr, RECT* bounds = nullptr) {
+bool IsBadgeEligible(HWND target, DWORD* processId = nullptr) {
     if (!DescribeWindow(target) || IsIconic(target)) return false;
     const LONG_PTR style = GetWindowLongPtrW(target, GWL_STYLE);
-    if (!(style & WS_CAPTION)) return false;
+    // A title bar without system caption buttons has no safe native-looking
+    // insertion point. Such windows can still be pinned by the hotkey.
+    if (!(style & WS_CAPTION) || !(style & WS_SYSMENU)) return false;
     RECT rect{};
-    if (FAILED(DwmGetWindowAttribute(target, DWMWA_EXTENDED_FRAME_BOUNDS,
-                                    &rect, sizeof(rect))) && !GetWindowRect(target, &rect))
-        return false;
+    if (!GetWindowRect(target, &rect)) return false;
     if (rect.right - rect.left < 220 || rect.bottom - rect.top < 70) return false;
-    DWORD pid = 0;
-    GetWindowThreadProcessId(target, &pid);
-    if (processId) *processId = pid;
-    if (bounds) *bounds = rect;
+    if (processId) GetWindowThreadProcessId(target, processId);
     return true;
-}
-
-bool IsTrackedPin(HWND target, DWORD pid) {
-    return std::any_of(g_ownedPins.begin(), g_ownedPins.end(),
-        [target, pid](const PinState& p) { return p.hwnd == target && p.pid == pid; });
 }
 
 // No permanent tile: only the native-size pin glyph is visible in the caption.
@@ -698,12 +684,10 @@ void DrawBadge(HWND hwnd) {
     DeleteObject(transparent);
 
     HWND target = reinterpret_cast<HWND>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    DWORD pid = 0;
-    GetWindowThreadProcessId(target, &pid);
-    const bool pinned = IsWindow(target) && (GetWindowLongPtrW(target, GWL_EXSTYLE) & WS_EX_TOPMOST);
-    const bool dark = UseDarkMenu();
     auto it = std::find_if(g_badges.begin(), g_badges.end(),
         [hwnd](const BadgeEntry& p) { return p.badge == hwnd; });
+    const bool pinned = it != g_badges.end() && it->pinned;
+    const bool dark = it != g_badges.end() ? it->dark : UseDarkMenu();
     const bool hovering = it != g_badges.end() && it->hover;
     if (hovering) {
         // Match the understated Win11 caption hover treatment. Never draw
@@ -942,6 +926,7 @@ void CALLBACK OnBadgeWindowEvent(HWINEVENTHOOK, DWORD event, HWND target,
     }
     // A newly shown/hidden root window can change the set of visible badges.
     if (event == EVENT_OBJECT_SHOW || event == EVENT_OBJECT_HIDE ||
+        event == EVENT_OBJECT_NAMECHANGE ||
         event == EVENT_SYSTEM_MINIMIZESTART || event == EVENT_SYSTEM_MINIMIZEEND) {
         if (target == GetAncestor(target, GA_ROOT)) RequestBadgeRefresh();
         return;
@@ -973,6 +958,8 @@ void InitializeBadges() {
                                       nullptr, OnBadgeWindowEvent, 0, 0, flags);
     g_badgeHooks[4] = SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY,
                                       nullptr, OnBadgeWindowEvent, 0, 0, flags);
+    g_badgeHooks[5] = SetWinEventHook(EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE,
+                                      nullptr, OnBadgeWindowEvent, 0, 0, flags);
     RequestBadgeRefresh();
 }
 
@@ -1001,6 +988,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_text = PinTrayLocale::Detect();
         g_rtlLanguage = IsRightToLeftLanguage();
         if (g_popup) {
+            const UINT dpi = g_popup->dpi;
+            HFONT font = CreateSystemMenuFont(dpi);
+            if (font) {
+                if (g_popup->font) DeleteObject(g_popup->font);
+                g_popup->font = font;
+            }
             g_popup->dark = UseDarkMenu();
             BuildPopupRows(*g_popup);
             LayoutPopup(*g_popup);
