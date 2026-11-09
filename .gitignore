@@ -13,3 +13,6 @@ artifacts/
 *.appxbundle
 *.pfx
 *.cer
+
+# Generated from the committed PNG icon
+assets/PinTray.ico

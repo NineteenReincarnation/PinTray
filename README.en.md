@@ -20,15 +20,15 @@
 ## Features
 
 - Pin or unpin windows, including multiple windows at once.
-- Choose a window from the tray menu or use a global shortcut.
+- Left-click the tray icon, then click a window to pin or unpin it. Right-click for the window list, or press Esc to cancel.
 - Set your own shortcut. The default is `Ctrl + Alt + P`.
 - Start with Windows and follow the system light or dark theme.
 
 ## Requirements
 
 - Windows 11 x64.
-- The installer and portable build do not require a separate .NET runtime.
-- Building from source requires the .NET 10 SDK.
+- The installer and portable build need no separate runtime.
+- Building from source requires Visual Studio C++ tools.
 
 ## License
 
