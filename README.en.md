@@ -20,7 +20,7 @@
 ## Features
 
 - Pin or unpin windows, including multiple windows at once.
-- Supported windows have a persistent pin beside the minimize button. Click it to toggle always-on-top.
+- Supported windows have a small pin attached near the upper-right edge. Click it to toggle always-on-top.
 - Or use a customizable global shortcut, `Ctrl + Alt + P` by default.
 - Start with Windows and follow your system theme and preferred display language (English fallback).
 
