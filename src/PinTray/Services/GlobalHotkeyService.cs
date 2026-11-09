@@ -60,16 +60,29 @@ public sealed class GlobalHotkeyService : IDisposable
 
     private static bool TryDecode(string choice, out uint modifiers, out uint key)
     {
-        (modifiers, key) = choice switch
+        switch (choice)
         {
-            "Ctrl+Alt+P" => (WindowNative.ModControl | WindowNative.ModAlt, 0x50),
-            "Ctrl+Alt+T" => (WindowNative.ModControl | WindowNative.ModAlt, 0x54),
-            "Ctrl+Shift+Space" => (WindowNative.ModControl | WindowNative.ModShift, 0x20),
-            "Win+Ctrl+T" => (WindowNative.ModWin | WindowNative.ModControl, 0x54),
-            _ => (0u, 0u)
-        };
-
-        return key != 0;
+            case "Ctrl+Alt+P":
+                modifiers = WindowNative.ModControl | WindowNative.ModAlt;
+                key = 0x50;
+                return true;
+            case "Ctrl+Alt+T":
+                modifiers = WindowNative.ModControl | WindowNative.ModAlt;
+                key = 0x54;
+                return true;
+            case "Ctrl+Shift+Space":
+                modifiers = WindowNative.ModControl | WindowNative.ModShift;
+                key = 0x20;
+                return true;
+            case "Win+Ctrl+T":
+                modifiers = WindowNative.ModWin | WindowNative.ModControl;
+                key = 0x54;
+                return true;
+            default:
+                modifiers = 0;
+                key = 0;
+                return false;
+        }
     }
 
     private nint WndProc(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
