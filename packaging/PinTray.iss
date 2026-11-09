@@ -1,4 +1,4 @@
-#define AppVersion "0.3.3"
+#define AppVersion "0.4.3"
 #define AppName "PinTray"
 #define AppExe "PinTray.exe"
 

@@ -84,5 +84,5 @@ jobs:
           $portable = "artifacts/PinTray-Portable-$version-win-x64.exe"
           if (!(Test-Path $installer)) { throw "Installer version doesn't match executable: $version" }
           Copy-Item $exe $portable
-          gh release create "v$version" $installer $portable --title "PinTray $version" --notes-file ".github/RELEASE_NOTES.md" --prerelease --target $env:GITHUB_SHA
+          gh release create "v$version" $installer $portable --title "PinTray $version" --notes-file ".github/RELEASE_NOTES.md" --latest --target $env:GITHUB_SHA
 
