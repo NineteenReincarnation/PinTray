@@ -57,6 +57,13 @@ bool g_autostart = true;
 bool g_packaged = false;
 std::vector<PinState> g_ownedPins;
 PinTrayLocale::Text g_text = PinTrayLocale::ForLanguage(L"en");
+bool g_rtlLanguage = false;
+bool IsRightToLeftLanguage() {
+    const std::wstring name = PinTrayLocale::PrimaryLanguage();
+    return name.starts_with(L"ar") || name.starts_with(L"he") ||
+           name.starts_with(L"fa") || name.starts_with(L"ur") ||
+           name.starts_with(L"ps");
+}
 
 bool IsPackaged() {
     UINT32 length = 0;
@@ -276,6 +283,22 @@ void BuildPopupRows(PopupState& p) {
 void LayoutPopup(PopupState& p) {
     p.visible.clear();
     p.width = Scale(p, 260);
+    // Measure localized text once when opening/changing the menu. The normal
+    // idle process does not keep a graphics context or continually measure text.
+    HDC dc = GetDC(nullptr);
+    if (dc) {
+        HFONT old = p.font ? static_cast<HFONT>(SelectObject(dc, p.font)) : nullptr;
+        for (const PopupRow& row : p.rows) {
+            if (row.separator) continue;
+            SIZE measured{};
+            if (GetTextExtentPoint32W(dc, row.label.c_str(),
+                                      static_cast<int>(row.label.size()), &measured))
+                p.width = std::max(p.width, measured.cx + Scale(p, 112));
+        }
+        if (old) SelectObject(dc, old);
+        ReleaseDC(nullptr, dc);
+    }
+    p.width = std::min(p.width, Scale(p, 470));
     const int padding = Scale(p, 7);
     int y = padding;
     for (size_t i = 0; i < p.rows.size(); ++i) {
@@ -414,7 +437,8 @@ void PaintPopup(PopupState& p) {
                       bounds.right - Scale(p, 38), bounds.bottom};
         SetTextColor(dc, color);
         DrawTextW(dc, row.label.c_str(), -1, &textRect,
-                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX |
+                  (g_rtlLanguage ? DT_RTLREADING | DT_RIGHT : 0));
         if (row.next || row.checked) {
             HPEN pen = CreatePen(PS_SOLID, std::max(1, Scale(p, 1)), color);
             HGDIOBJ old = SelectObject(dc, pen);
@@ -934,6 +958,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_SETTINGCHANGE:
     case WM_THEMECHANGED:
         g_text = PinTrayLocale::Detect();
+        g_rtlLanguage = IsRightToLeftLanguage();
         if (g_popup) {
             g_popup->dark = UseDarkMenu();
             BuildPopupRows(*g_popup);
@@ -970,6 +995,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_instance = instance;
     g_text = PinTrayLocale::Detect();
+    g_rtlLanguage = IsRightToLeftLanguage();
     g_mutex = CreateMutexW(nullptr, TRUE, L"Local\\NineteenReincarnation.PinTray.Singleton");
     if (!g_mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
         if (g_mutex) CloseHandle(g_mutex);
