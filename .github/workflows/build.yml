@@ -71,7 +71,7 @@ jobs:
           name: PinTray-installer-win-x64
           path: artifacts/installer
 
-      - name: Publish GitHub prerelease
+      - name: Publish GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
