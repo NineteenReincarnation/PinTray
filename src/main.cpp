@@ -8,7 +8,6 @@
 #include <appmodel.h>
 #include <string>
 #include <vector>
-#include <unordered_map>
 #include <algorithm>
 #include <iterator>
 #include <utility>
@@ -38,6 +37,7 @@ constexpr UINT kHotkeyIdB = 51;
 constexpr size_t kMaxMenuWindows = 22;
 
 struct WindowEntry { HWND hwnd; DWORD pid; std::wstring title; bool topmost; };
+struct PinState { HWND hwnd; DWORD pid; };
 struct HotkeyChoice { UINT mods; UINT key; const wchar_t* label; };
 constexpr HotkeyChoice kHotkeys[] = {
     { MOD_CONTROL | MOD_ALT, 'P', L"Ctrl + Alt + P" },
@@ -57,9 +57,9 @@ UINT g_hotkeyId = 0;
 int g_hotkeyChoice = 0;
 bool g_autostart = true;
 bool g_selecting = false;
+bool g_selectionPending = false;
 bool g_packaged = false;
-std::unordered_map<HWND, DWORD> g_ownedPins;
-std::vector<HWND> g_menuTargets;
+std::vector<PinState> g_ownedPins;
 
 bool IsPackaged() {
     UINT32 length = 0;
@@ -145,31 +145,29 @@ bool TogglePin(HWND hwnd) {
     const HWND destination = entry.topmost ? HWND_NOTOPMOST : HWND_TOPMOST;
     if (!SetWindowPos(hwnd, destination, 0, 0, 0, 0,
                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER)) return false;
-    if (entry.topmost) g_ownedPins.erase(hwnd);
-    else g_ownedPins[hwnd] = entry.pid;
+    if (entry.topmost) std::erase_if(g_ownedPins, [hwnd](const PinState& p) { return p.hwnd == hwnd; });
+    else g_ownedPins.push_back({hwnd, entry.pid});
     return true;
 }
 
 void ClearOwnedPins() {
-    for (const auto& [hwnd, pid] : g_ownedPins) {
-        DWORD current = 0;
-        if (IsWindow(hwnd) && GetWindowThreadProcessId(hwnd, &current) && current == pid &&
-            (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
-            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+    for (const auto& p : g_ownedPins) {
+        DWORD pid = 0;
+        if (IsWindow(p.hwnd) && GetWindowThreadProcessId(p.hwnd, &pid) && pid == p.pid &&
+            (GetWindowLongPtrW(p.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
+            SetWindowPos(p.hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
         }
     }
-    g_ownedPins.clear();
+    std::vector<PinState>().swap(g_ownedPins);
 }
 
 void RefreshTooltip() {
-    for (auto it = g_ownedPins.begin(); it != g_ownedPins.end();) {
+    std::erase_if(g_ownedPins, [](const PinState& p) {
         DWORD pid = 0;
-        if (!IsWindow(it->first) || !GetWindowThreadProcessId(it->first, &pid) ||
-            pid != it->second || !(GetWindowLongPtrW(it->first, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
-            it = g_ownedPins.erase(it);
-        } else ++it;
-    }
+        return !IsWindow(p.hwnd) || !GetWindowThreadProcessId(p.hwnd, &pid) || pid != p.pid ||
+               !(GetWindowLongPtrW(p.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST);
+    });
     NOTIFYICONDATAW data{};
     data.cbSize = sizeof(data); data.hWnd = g_hwnd; data.uID = kTrayId;
     data.uFlags = NIF_TIP;
@@ -234,16 +232,17 @@ std::wstring MenuTitle(std::wstring title) {
 
 void StopSelecting() {
     g_selecting = false;
+    g_selectionPending = false;
     if (g_mouseHook) { UnhookWindowsHookEx(g_mouseHook); g_mouseHook = nullptr; }
     if (g_keyHook) { UnhookWindowsHookEx(g_keyHook); g_keyHook = nullptr; }
     RefreshTooltip();
 }
 
 LRESULT CALLBACK MouseSelectProc(int code, WPARAM message, LPARAM lParam) {
-    if (code == HC_ACTION && g_selecting && message == WM_LBUTTONDOWN) {
+    if (code == HC_ACTION && g_selecting && !g_selectionPending && message == WM_LBUTTONDOWN) {
         const auto* event = reinterpret_cast<const MSLLHOOKSTRUCT*>(lParam);
         HWND target = GetAncestor(WindowFromPoint(event->pt), GA_ROOT);
-        PostMessageW(g_hwnd, kSelectDone, reinterpret_cast<WPARAM>(target), 0);
+        g_selectionPending = PostMessageW(g_hwnd, kSelectDone, reinterpret_cast<WPARAM>(target), 0) != FALSE;
     }
     return CallNextHookEx(nullptr, code, message, lParam);
 }
@@ -252,7 +251,8 @@ LRESULT CALLBACK KeyboardSelectProc(int code, WPARAM message, LPARAM lParam) {
     if (code == HC_ACTION && g_selecting && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)) {
         const auto* event = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
         if (event->vkCode == VK_ESCAPE) {
-            PostMessageW(g_hwnd, kSelectCancel, 0, 0);
+            if (!g_selectionPending)
+                g_selectionPending = PostMessageW(g_hwnd, kSelectCancel, 0, 0) != FALSE;
             return 1;
         }
     }
@@ -262,6 +262,7 @@ LRESULT CALLBACK KeyboardSelectProc(int code, WPARAM message, LPARAM lParam) {
 void StartSelecting() {
     if (g_selecting) { StopSelecting(); return; }
     g_selecting = true;
+    g_selectionPending = false;
     g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseSelectProc, g_instance, 0);
     g_keyHook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardSelectProc, g_instance, 0);
     if (!g_mouseHook || !g_keyHook) {
@@ -282,14 +283,15 @@ void ShowMenu() {
     }
     AppendMenuW(menu, MF_STRING, kMenuSelect, L"选择窗口置顶\t单击托盘图标");
     const auto windows = GetWindows();
-    g_menuTargets.clear();
+    std::vector<HWND> menuTargets;
+    menuTargets.reserve(std::min(windows.size(), kMaxMenuWindows));
     for (size_t i = 0; i < windows.size() && i < kMaxMenuWindows; ++i) {
         const auto& w = windows[i];
-        g_menuTargets.push_back(w.hwnd);
+        menuTargets.push_back(w.hwnd);
         AppendMenuW(windowsMenu, MF_STRING | (w.topmost ? MF_CHECKED : 0),
                     kWindowMenuBase + static_cast<UINT>(i), MenuTitle(w.title).c_str());
     }
-    if (g_menuTargets.empty()) AppendMenuW(windowsMenu, MF_STRING | MF_GRAYED, 0, L"没有可用窗口");
+    if (menuTargets.empty()) AppendMenuW(windowsMenu, MF_STRING | MF_GRAYED, 0, L"没有可用窗口");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(windowsMenu), L"窗口列表");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (g_ownedPins.empty() ? MF_GRAYED : 0),
@@ -310,8 +312,8 @@ void ShowMenu() {
                                          cursor.x, cursor.y, g_hwnd, nullptr);
     PostMessageW(g_hwnd, WM_NULL, 0, 0);
     DestroyMenu(menu); // Destroys child submenus as well.
-    if (choice >= kWindowMenuBase && choice < kWindowMenuBase + g_menuTargets.size()) {
-        TogglePin(g_menuTargets[choice - kWindowMenuBase]);
+    if (choice >= kWindowMenuBase && choice < kWindowMenuBase + menuTargets.size()) {
+        TogglePin(menuTargets[choice - kWindowMenuBase]);
         RefreshTooltip();
     } else if (choice >= kHotkeyMenuBase && choice < kHotkeyMenuBase + std::size(kHotkeys)) {
         if (!ChangeHotkey(static_cast<int>(choice - kHotkeyMenuBase)))
@@ -328,7 +330,7 @@ void ShowMenu() {
     } else if (choice == kMenuExit) {
         DestroyWindow(g_hwnd);
     }
-    g_menuTargets.clear();
+
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
