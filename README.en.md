@@ -20,8 +20,8 @@
 ## Features
 
 - Pin or unpin windows, including multiple windows at once.
-- Left-click the tray icon, then click a window to pin or unpin it. Right-click for the window list, or press Esc to cancel.
-- Set your own shortcut. The default is `Ctrl + Alt + P`.
+- A pin appears beside the title bar of the active window. Click it to toggle always-on-top; pinned windows keep the indicator.
+- Or use a customizable global shortcut, `Ctrl + Alt + P` by default.
 - Start with Windows and follow the system light or dark theme.
 
 ## Requirements
