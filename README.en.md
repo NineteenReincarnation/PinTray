@@ -20,9 +20,9 @@
 ## Features
 
 - Pin or unpin windows, including multiple windows at once.
-- A pin appears beside the title bar of the active window. Click it to toggle always-on-top; pinned windows keep the indicator.
+- Supported windows have a persistent pin beside the minimize button. Click it to toggle always-on-top.
 - Or use a customizable global shortcut, `Ctrl + Alt + P` by default.
-- Start with Windows and follow the system light or dark theme.
+- Start with Windows and follow your system theme and preferred display language (English fallback).
 
 ## Requirements
 
