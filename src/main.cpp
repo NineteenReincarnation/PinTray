@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <iterator>
 #include <utility>
+#include <cstdint>
 #include <cwchar>
 #include <windowsx.h>
 
@@ -25,19 +26,14 @@ constexpr wchar_t kClassName[] = L"NineteenReincarnation.PinTray";
 constexpr wchar_t kSettingsPath[] = L"Software\\NineteenReincarnation\\PinTray";
 constexpr wchar_t kRunPath[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr UINT kTrayMessage = WM_APP + 1;
-constexpr UINT kSelectDone = WM_APP + 2;
-constexpr UINT kSelectCancel = WM_APP + 3;
-constexpr UINT kPopupCheckFocus = WM_APP + 4;
+constexpr UINT kPopupCheckFocus = WM_APP + 2;
+constexpr UINT kBadgeSync = WM_APP + 3;
 constexpr UINT kTrayId = 1;
-constexpr UINT kWindowMenuBase = 1000;
 constexpr UINT kHotkeyMenuBase = 2000;
 constexpr UINT kMenuAutostart = 3000;
-constexpr UINT kMenuClear = 3001;
-constexpr UINT kMenuSelect = 3002;
 constexpr UINT kMenuExit = 3003;
 constexpr UINT kHotkeyIdA = 50;
 constexpr UINT kHotkeyIdB = 51;
-constexpr size_t kMaxMenuWindows = 22;
 
 struct WindowEntry { HWND hwnd; DWORD pid; std::wstring title; bool topmost; };
 struct PinState { HWND hwnd; DWORD pid; };
@@ -53,14 +49,10 @@ HINSTANCE g_instance = nullptr;
 HWND g_hwnd = nullptr;
 HICON g_icon = nullptr;
 HANDLE g_mutex = nullptr;
-HHOOK g_mouseHook = nullptr;
-HHOOK g_keyHook = nullptr;
 UINT g_taskbarCreated = 0;
 UINT g_hotkeyId = 0;
 int g_hotkeyChoice = -1;
 bool g_autostart = true;
-bool g_selecting = false;
-bool g_selectionPending = false;
 bool g_packaged = false;
 std::vector<PinState> g_ownedPins;
 
@@ -210,78 +202,15 @@ bool ChangeHotkey(int index) {
     return true;
 }
 
-std::vector<WindowEntry> GetWindows() {
-    std::vector<WindowEntry> windows;
-    EnumWindows([](HWND hwnd, LPARAM param) -> BOOL {
-        auto* results = reinterpret_cast<std::vector<WindowEntry>*>(param);
-        WindowEntry entry{};
-        if (DescribeWindow(hwnd, &entry)) results->push_back(std::move(entry));
-        return TRUE;
-    }, reinterpret_cast<LPARAM>(&windows));
-    std::stable_sort(windows.begin(), windows.end(), [](const auto& a, const auto& b) {
-        return a.topmost && !b.topmost;
-    });
-    return windows;
-}
-
-std::wstring MenuTitle(std::wstring title) {
-    if (title.size() > 45) title = title.substr(0, 44) + L"…";
-    return title;
-}
-
-void StopSelecting() {
-    g_selecting = false;
-    g_selectionPending = false;
-    if (g_mouseHook) { UnhookWindowsHookEx(g_mouseHook); g_mouseHook = nullptr; }
-    if (g_keyHook) { UnhookWindowsHookEx(g_keyHook); g_keyHook = nullptr; }
-    RefreshTooltip();
-}
-
-LRESULT CALLBACK MouseSelectProc(int code, WPARAM message, LPARAM lParam) {
-    if (code == HC_ACTION && g_selecting && !g_selectionPending && message == WM_LBUTTONDOWN) {
-        const auto* event = reinterpret_cast<const MSLLHOOKSTRUCT*>(lParam);
-        HWND target = GetAncestor(WindowFromPoint(event->pt), GA_ROOT);
-        g_selectionPending = PostMessageW(g_hwnd, kSelectDone, reinterpret_cast<WPARAM>(target), 0) != FALSE;
-    }
-    return CallNextHookEx(nullptr, code, message, lParam);
-}
-
-LRESULT CALLBACK KeyboardSelectProc(int code, WPARAM message, LPARAM lParam) {
-    if (code == HC_ACTION && g_selecting && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)) {
-        const auto* event = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
-        if (event->vkCode == VK_ESCAPE) {
-            if (!g_selectionPending)
-                g_selectionPending = PostMessageW(g_hwnd, kSelectCancel, 0, 0) != FALSE;
-            return 1;
-        }
-    }
-    return CallNextHookEx(nullptr, code, message, lParam);
-}
-
-void StartSelecting() {
-    if (g_selecting) { StopSelecting(); return; }
-    g_selecting = true;
-    g_selectionPending = false;
-    g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseSelectProc, g_instance, 0);
-    g_keyHook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardSelectProc, g_instance, 0);
-    if (!g_mouseHook || !g_keyHook) {
-        StopSelecting();
-        MessageBoxW(nullptr, L"无法进入窗口选择模式。", L"PinTray", MB_OK | MB_ICONWARNING);
-    }
-}
-
 // The popup is allocated only while visible. Regular tray operation needs no UI framework.
-enum class MenuPage { Main, Windows, Shortcuts };
-enum MenuGlyph { GlyphNone, GlyphPin, GlyphWindow, GlyphKeyboard, GlyphStartup, GlyphClear, GlyphExit, GlyphBack };
-constexpr UINT kMenuWindows = 3004;
+enum class MenuPage { Main, Shortcuts };
+enum MenuGlyph { GlyphNone, GlyphKeyboard, GlyphStartup, GlyphExit, GlyphBack };
 constexpr UINT kMenuShortcuts = 3005;
 constexpr UINT kMenuBack = 3006;
-constexpr int kMaxVisibleWindows = 9;
 
 struct PopupRow {
     std::wstring label;
     UINT action = 0;
-    HWND target = nullptr;
     MenuGlyph glyph = GlyphNone;
     bool checked = false;
     bool next = false;
@@ -294,7 +223,7 @@ struct PopupState {
     MenuPage page = MenuPage::Main;
     POINT anchor{};
     UINT dpi = 96;
-    int width = 0, height = 0, hover = -1, scroll = 0;
+    int width = 0, height = 0, hover = -1;
     bool dark = true;
     bool hasBeenActivated = false;
     HFONT font = nullptr;
@@ -317,34 +246,22 @@ bool UseDarkMenu() {
 }
 
 void AddMenuRow(PopupState& p, const wchar_t* name, UINT command, MenuGlyph glyph,
-                bool checked = false, bool next = false, bool disabled = false, HWND target = nullptr) {
-    p.rows.push_back({name, command, target, glyph, checked, next, disabled, false});
+                bool checked = false, bool next = false, bool disabled = false) {
+    p.rows.push_back({name, command, glyph, checked, next, disabled, false});
 }
 void MenuSeparator(PopupState& p) {
-    p.rows.push_back({L"", 0, nullptr, GlyphNone, false, false, true, true});
+    p.rows.push_back({L"", 0, GlyphNone, false, false, true, true});
 }
 
 void BuildPopupRows(PopupState& p) {
     p.rows.clear();
     p.hover = -1;
     if (p.page == MenuPage::Main) {
-        AddMenuRow(p, L"选择窗口置顶", kMenuSelect, GlyphPin);
-        AddMenuRow(p, L"窗口列表", kMenuWindows, GlyphWindow, false, true);
         AddMenuRow(p, L"快捷键", kMenuShortcuts, GlyphKeyboard, false, true);
         MenuSeparator(p);
         AddMenuRow(p, L"开机自启", kMenuAutostart, GlyphStartup, g_autostart, false, g_packaged);
-        if (!g_ownedPins.empty())
-            AddMenuRow(p, L"取消全部置顶", kMenuClear, GlyphClear);
         MenuSeparator(p);
         AddMenuRow(p, L"退出", kMenuExit, GlyphExit);
-    } else if (p.page == MenuPage::Windows) {
-        AddMenuRow(p, L"窗口列表", kMenuBack, GlyphBack);
-        const auto windows = GetWindows();
-        if (windows.empty()) AddMenuRow(p, L"没有可操作的窗口", 0, GlyphNone, false, false, true);
-        for (const auto& window : windows) {
-            p.rows.push_back({MenuTitle(window.title), 0, window.hwnd, GlyphWindow,
-                              window.topmost, false, false, false});
-        }
     } else {
         AddMenuRow(p, L"快捷键", kMenuBack, GlyphBack);
         for (size_t i = 0; i < std::size(kHotkeys); ++i) {
@@ -356,25 +273,13 @@ void BuildPopupRows(PopupState& p) {
 
 void LayoutPopup(PopupState& p) {
     p.visible.clear();
-    p.width = Scale(p, 304);
+    p.width = Scale(p, 260);
     const int padding = Scale(p, 7);
-    const int rowHeight = Scale(p, 43);
-    const int separatorHeight = Scale(p, 9);
     int y = padding;
-    auto append = [&](size_t index) {
-        int height = p.rows[index].separator ? separatorHeight : rowHeight;
-        p.visible.push_back({index, {padding, y, p.width - padding, y + height}});
+    for (size_t i = 0; i < p.rows.size(); ++i) {
+        const int height = Scale(p, p.rows[i].separator ? 9 : 43);
+        p.visible.push_back({i, {padding, y, p.width - padding, y + height}});
         y += height;
-    };
-    if (p.page == MenuPage::Windows) {
-        append(0);
-        const int count = static_cast<int>(p.rows.size()) - 1;
-        p.scroll = std::clamp(p.scroll, 0, std::max(0, count - kMaxVisibleWindows));
-        const int last = std::min(count, p.scroll + kMaxVisibleWindows);
-        for (int i = p.scroll; i < last; ++i) append(static_cast<size_t>(i + 1));
-    } else {
-        p.scroll = 0;
-        for (size_t i = 0; i < p.rows.size(); ++i) append(i);
     }
     p.height = y + padding;
 }
@@ -408,19 +313,6 @@ void DrawMenuGlyph(HDC dc, int kind, int x, int y, const PopupState& p, COLORREF
         LineTo(dc, x + bx * unit, y + by * unit);
     };
     switch (kind) {
-    case GlyphPin:
-        line(-6, -7, 6, -7);
-        line(-4, -5, 4, -5);
-        line(-3, -5, -2, 2);
-        line(3, -5, 2, 2);
-        line(-5, 2, 5, 2);
-        line(0, 2, 0, 10);
-        break;
-    case GlyphWindow:
-        RoundRect(dc, x - 9 * unit, y - 8 * unit, x + 9 * unit, y + 8 * unit,
-                  4 * unit, 4 * unit);
-        line(-8, -3, 8, -3);
-        break;
     case GlyphKeyboard:
         RoundRect(dc, x - 10 * unit, y - 7 * unit, x + 10 * unit, y + 7 * unit,
                   4 * unit, 4 * unit);
@@ -431,12 +323,6 @@ void DrawMenuGlyph(HDC dc, int kind, int x, int y, const PopupState& p, COLORREF
         Ellipse(dc, x - 8 * unit, y - 8 * unit, x + 8 * unit, y + 8 * unit);
         line(0, -4, 0, 4);
         line(0, 4, 4, 1);
-        break;
-    case GlyphClear:
-        RoundRect(dc, x - 9 * unit, y - 5 * unit, x + 4 * unit, y + 7 * unit,
-                  3 * unit, 3 * unit);
-        RoundRect(dc, x - 3 * unit, y - 9 * unit, x + 10 * unit, y + 3 * unit,
-                  3 * unit, 3 * unit);
         break;
     case GlyphExit:
         Arc(dc, x - 9 * unit, y - 9 * unit, x + 9 * unit, y + 9 * unit,
@@ -562,7 +448,6 @@ void RunPopupAction(PopupState& p, int visibleIndex) {
     if (visibleIndex < 0 || visibleIndex >= static_cast<int>(p.visible.size())) return;
     const PopupRow row = p.rows[p.visible[visibleIndex].index];
     if (row.separator || row.disabled) return;
-    if (row.action == kMenuWindows) { SwitchPopupPage(p, MenuPage::Windows); return; }
     if (row.action == kMenuShortcuts) { SwitchPopupPage(p, MenuPage::Shortcuts); return; }
     if (row.action == kMenuBack) { SwitchPopupPage(p, MenuPage::Main); return; }
     if (row.action == kMenuAutostart) {
@@ -575,16 +460,13 @@ void RunPopupAction(PopupState& p, int visibleIndex) {
         }
         return;
     }
-    const HWND menuWindow = p.hwnd;
-    DestroyWindow(menuWindow);
-    if (row.action == kMenuSelect) StartSelecting();
-    else if (row.action == kMenuExit) DestroyWindow(g_hwnd);
-    else if (row.action == kMenuClear) { ClearOwnedPins(); RefreshTooltip(); }
+    DestroyWindow(p.hwnd);
+    if (row.action == kMenuExit) DestroyWindow(g_hwnd);
     else if (row.action >= kHotkeyMenuBase && row.action < kHotkeyMenuBase + std::size(kHotkeys)) {
         if (!ChangeHotkey(static_cast<int>(row.action - kHotkeyMenuBase)))
-            MessageBoxW(nullptr, L"这个快捷键已被占用，请选择其他组合。", L"PinTray",
+            MessageBoxW(nullptr, L"该快捷键已被占用。", L"PinTray",
                         MB_OK | MB_ICONINFORMATION);
-    } else if (row.target && TogglePin(row.target)) RefreshTooltip();
+    }
 }
 
 LRESULT CALLBACK PopupWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -629,13 +511,6 @@ LRESULT CALLBACK PopupWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         RunPopupAction(*state, PopupHitTest(*state, point));
         return 0;
     }
-    case WM_MOUSEWHEEL:
-        if (state->page == MenuPage::Windows && state->rows.size() > kMaxVisibleWindows + 1) {
-            state->scroll = std::max(0, state->scroll - (GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 2 : -2));
-            LayoutPopup(*state);
-            InvalidateRect(hwnd, nullptr, FALSE);
-        }
-        return 0;
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE || wParam == VK_LEFT) {
             if (state->page == MenuPage::Main) DestroyWindow(hwnd);
@@ -734,10 +609,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case kTrayMessage: {
         const UINT action = LOWORD(lParam);
-        // NOTIFYICON_VERSION_4 delivers context-menu and selection events.
-        // Handling legacy button-up messages here causes duplicate toggles.
+        // Pin toggles are available only from the window badge or global hotkey.
         if (action == WM_CONTEXTMENU) ShowMenu();
-        else if (action == NIN_SELECT || action == NIN_KEYSELECT) StartSelecting();
         return 0;
     }
     case WM_HOTKEY:
@@ -745,16 +618,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (TogglePin(GetForegroundWindow())) RefreshTooltip();
         }
         return 0;
-    case kSelectDone:
-        StopSelecting();
-        if (TogglePin(reinterpret_cast<HWND>(wParam))) RefreshTooltip();
-        return 0;
-    case kSelectCancel:
-        StopSelecting();
-        return 0;
     case WM_DESTROY:
         if (g_popup) DestroyWindow(g_popup->hwnd);
-        StopSelecting();
         ClearOwnedPins();
         RemoveTrayIcon();
         if (g_hotkeyId) UnregisterHotKey(hwnd, static_cast<int>(g_hotkeyId));
