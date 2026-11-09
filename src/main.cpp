@@ -12,8 +12,6 @@
 #include <iterator>
 #include <utility>
 #include <cstdint>
-#include <cwchar>
-#include <windowsx.h>
 #include "i18n.h"
 
 #pragma comment(lib, "user32.lib")
@@ -27,7 +25,6 @@ constexpr wchar_t kClassName[] = L"NineteenReincarnation.PinTray";
 constexpr wchar_t kSettingsPath[] = L"Software\\NineteenReincarnation\\PinTray";
 constexpr wchar_t kRunPath[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr UINT kTrayMessage = WM_APP + 1;
-constexpr UINT kPopupCheckFocus = WM_APP + 2;
 constexpr UINT kBadgeSync = WM_APP + 3;
 constexpr UINT kBadgeMove = WM_APP + 4;
 constexpr UINT kTrayId = 1;
@@ -208,40 +205,8 @@ bool ChangeHotkey(int index) {
     return true;
 }
 
-// The popup is allocated only while visible. Regular tray operation needs no UI framework.
-enum class MenuPage { Main, Shortcuts };
-enum MenuGlyph { GlyphNone, GlyphKeyboard, GlyphStartup, GlyphExit, GlyphBack };
-constexpr UINT kMenuShortcuts = 3005;
-constexpr UINT kMenuBack = 3006;
-
-struct PopupRow {
-    std::wstring label;
-    UINT action = 0;
-    MenuGlyph glyph = GlyphNone;
-    bool checked = false;
-    bool next = false;
-    bool disabled = false;
-    bool separator = false;
-};
-struct DisplayRow { size_t index; RECT bounds; };
-struct PopupState {
-    HWND hwnd = nullptr;
-    MenuPage page = MenuPage::Main;
-    POINT anchor{};
-    UINT dpi = 96;
-    int width = 0, height = 0, hover = -1;
-    bool dark = true;
-    bool hasBeenActivated = false;
-    HFONT font = nullptr;
-    std::vector<PopupRow> rows;
-    std::vector<DisplayRow> visible;
-};
-PopupState* g_popup = nullptr;
-
-int Scale(const PopupState& p, int value) {
-    return MulDiv(value, static_cast<int>(p.dpi), 96);
-}
-
+// Let Windows manage menu activation, outside-click dismissal, and keyboard focus.
+// Do not retain a second custom popup window after the notification area closes.
 bool UseDarkMenu() {
     DWORD value = 1, size = sizeof(value);
     if (RegGetValueW(HKEY_CURRENT_USER,
@@ -251,388 +216,74 @@ bool UseDarkMenu() {
     return value == 0;
 }
 
-void AddMenuRow(PopupState& p, const wchar_t* name, UINT command, MenuGlyph glyph,
-                bool checked = false, bool next = false, bool disabled = false) {
-    p.rows.push_back({name, command, glyph, checked, next, disabled, false});
-}
-void MenuSeparator(PopupState& p) {
-    p.rows.push_back({L"", 0, GlyphNone, false, false, true, true});
-}
+void ShowMenu() {
+    // TrackPopupMenuEx runs its own modal loop. This guard prevents re-entry.
+    static bool showing = false;
+    static DWORD lastShownAt = 0;
+    const DWORD now = GetTickCount();
+    if (showing || (lastShownAt != 0 && now - lastShownAt < 200)) return;
+    showing = true;
+    lastShownAt = now;
 
-void BuildPopupRows(PopupState& p) {
-    p.rows.clear();
-    p.hover = -1;
-    if (p.page == MenuPage::Main) {
-        AddMenuRow(p, g_text.shortcuts, kMenuShortcuts, GlyphKeyboard, false, true);
-        MenuSeparator(p);
-        AddMenuRow(p, g_text.startup, kMenuAutostart, GlyphStartup, g_autostart, false, g_packaged);
-        MenuSeparator(p);
-        AddMenuRow(p, g_text.quit, kMenuExit, GlyphExit);
-    } else {
-        AddMenuRow(p, g_text.shortcuts, kMenuBack, GlyphBack);
-        for (size_t i = 0; i < std::size(kHotkeys); ++i) {
-            AddMenuRow(p, kHotkeys[i].label, kHotkeyMenuBase + static_cast<UINT>(i),
-                       GlyphKeyboard, g_hotkeyChoice == static_cast<int>(i));
-        }
-    }
-}
-
-void LayoutPopup(PopupState& p) {
-    p.visible.clear();
-    p.width = Scale(p, 260);
-    // Measure localized text once when opening/changing the menu. The normal
-    // idle process does not keep a graphics context or continually measure text.
-    HDC dc = GetDC(nullptr);
-    if (dc) {
-        HFONT old = p.font ? static_cast<HFONT>(SelectObject(dc, p.font)) : nullptr;
-        for (const PopupRow& row : p.rows) {
-            if (row.separator) continue;
-            SIZE measured{};
-            if (GetTextExtentPoint32W(dc, row.label.c_str(),
-                                      static_cast<int>(row.label.size()), &measured))
-                p.width = std::max(p.width, static_cast<int>(measured.cx) + Scale(p, 112));
-        }
-        if (old) SelectObject(dc, old);
-        ReleaseDC(nullptr, dc);
-    }
-    p.width = std::min(p.width, Scale(p, 470));
-    const int padding = Scale(p, 7);
-    int y = padding;
-    for (size_t i = 0; i < p.rows.size(); ++i) {
-        const int height = Scale(p, p.rows[i].separator ? 9 : 43);
-        p.visible.push_back({i, {padding, y, p.width - padding, y + height}});
-        y += height;
-    }
-    p.height = y + padding;
-}
-
-void PlacePopup(PopupState& p) {
-    HMONITOR monitor = MonitorFromPoint(p.anchor, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO info{sizeof(info)};
-    GetMonitorInfoW(monitor, &info);
-    const RECT work = info.rcWork;
-    const int offset = Scale(p, 10);
-    const int left = static_cast<int>(work.left);
-    const int top = static_cast<int>(work.top);
-    const int right = static_cast<int>(work.right);
-    const int bottom = static_cast<int>(work.bottom);
-    int x = std::clamp(static_cast<int>(p.anchor.x) - Scale(p, 48), left,
-                       std::max(left, right - p.width));
-    int y = (p.anchor.y + p.height + offset <= bottom)
-        ? p.anchor.y + offset : p.anchor.y - p.height - offset;
-    y = std::clamp(y, top, std::max(top, bottom - p.height));
-    SetWindowPos(p.hwnd, HWND_TOPMOST, x, y, p.width, p.height,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
-}
-
-void DrawMenuGlyph(HDC dc, int kind, int x, int y, const PopupState& p, COLORREF color) {
-    const int unit = std::max(1, Scale(p, 1));
-    HPEN pen = CreatePen(PS_SOLID, std::max(1, Scale(p, 2)), color);
-    HGDIOBJ oldPen = SelectObject(dc, pen);
-    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    auto line = [&](int ax, int ay, int bx, int by) {
-        MoveToEx(dc, x + ax * unit, y + ay * unit, nullptr);
-        LineTo(dc, x + bx * unit, y + by * unit);
-    };
-    switch (kind) {
-    case GlyphKeyboard:
-        RoundRect(dc, x - 10 * unit, y - 7 * unit, x + 10 * unit, y + 7 * unit,
-                  4 * unit, 4 * unit);
-        for (int i = -5; i <= 5; i += 5) line(i, -2, i + 1, -2);
-        line(-5, 3, 5, 3);
-        break;
-    case GlyphStartup:
-        Ellipse(dc, x - 8 * unit, y - 8 * unit, x + 8 * unit, y + 8 * unit);
-        line(0, -4, 0, 4);
-        line(0, 4, 4, 1);
-        break;
-    case GlyphExit:
-        Arc(dc, x - 9 * unit, y - 9 * unit, x + 9 * unit, y + 9 * unit,
-            x + 6 * unit, y - 7 * unit, x - 6 * unit, y - 7 * unit);
-        line(0, -10, 0, 1);
-        break;
-    case GlyphBack:
-        line(4, -7, -3, 0);
-        line(-3, 0, 4, 7);
-        break;
-    default:
-        break;
-    }
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(pen);
-}
-
-HFONT CreateSystemMenuFont(UINT dpi) {
-    NONCLIENTMETRICSW metrics{};
-    metrics.cbSize = sizeof(metrics);
-    if (SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics),
-                                   &metrics, 0, dpi))
-        return CreateFontIndirectW(&metrics.lfMenuFont);
-    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0))
-        return CreateFontIndirectW(&metrics.lfMenuFont);
-    return CreateFontW(-MulDiv(15, static_cast<int>(dpi), 96), 0, 0, 0, FW_NORMAL,
-                       FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0,
-                       CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-}
-
-void PaintPopup(PopupState& p) {
-    PAINTSTRUCT ps{};
-    HDC target = BeginPaint(p.hwnd, &ps);
-    if (!target) return;
-    HDC dc = CreateCompatibleDC(target);
-    HBITMAP bitmap = CreateCompatibleBitmap(target, p.width, p.height);
-    if (!dc || !bitmap) {
-        if (bitmap) DeleteObject(bitmap);
-        if (dc) DeleteDC(dc);
-        EndPaint(p.hwnd, &ps);
+    HMENU menu = CreatePopupMenu();
+    HMENU shortcuts = CreatePopupMenu();
+    if (!menu || !shortcuts) {
+        if (menu) DestroyMenu(menu);
+        if (shortcuts) DestroyMenu(shortcuts);
+        showing = false;
         return;
     }
-    HGDIOBJ oldBitmap = SelectObject(dc, bitmap);
-    const COLORREF bg = p.dark ? RGB(39, 39, 39) : RGB(248, 248, 248);
-    const COLORREF hoverBg = p.dark ? RGB(64, 64, 64) : RGB(231, 231, 231);
-    const COLORREF fore = p.dark ? RGB(244, 244, 244) : RGB(35, 35, 35);
-    const COLORREF muted = p.dark ? RGB(153, 153, 153) : RGB(112, 112, 112);
-    const COLORREF rule = p.dark ? RGB(77, 77, 77) : RGB(212, 212, 212);
-    RECT canvas{0, 0, p.width, p.height};
-    HBRUSH background = CreateSolidBrush(bg);
-    FillRect(dc, &canvas, background);
-    DeleteObject(background);
-    SetBkMode(dc, TRANSPARENT);
-    HGDIOBJ oldFont = SelectObject(dc, p.font);
-    const int textOffset = Scale(p, 62);
-    for (size_t i = 0; i < p.visible.size(); ++i) {
-        const auto& viewRow = p.visible[i];
-        const PopupRow& row = p.rows[viewRow.index];
-        const RECT bounds = viewRow.bounds;
-        if (row.separator) {
-            HPEN pen = CreatePen(PS_SOLID, 1, rule);
-            HGDIOBJ old = SelectObject(dc, pen);
-            const int center = (bounds.top + bounds.bottom) / 2;
-            MoveToEx(dc, Scale(p, 10), center, nullptr);
-            LineTo(dc, p.width - Scale(p, 10), center);
-            SelectObject(dc, old);
-            DeleteObject(pen);
-            continue;
-        }
-        if (static_cast<int>(i) == p.hover && !row.disabled) {
-            HBRUSH hover = CreateSolidBrush(hoverBg);
-            HGDIOBJ old = SelectObject(dc, hover);
-            HPEN stroke = CreatePen(PS_SOLID, 1, p.dark ? RGB(116, 116, 116) : RGB(192, 192, 192));
-            HGDIOBJ previous = SelectObject(dc, stroke);
-            RoundRect(dc, bounds.left + Scale(p, 1), bounds.top + Scale(p, 2),
-                      bounds.right - Scale(p, 1), bounds.bottom - Scale(p, 2),
-                      Scale(p, 8), Scale(p, 8));
-            SelectObject(dc, previous);
-            SelectObject(dc, old);
-            DeleteObject(stroke);
-            DeleteObject(hover);
-        }
-        const COLORREF color = row.disabled ? muted : fore;
-        DrawMenuGlyph(dc, row.glyph, Scale(p, 29), (bounds.top + bounds.bottom) / 2, p, color);
-        RECT textRect{bounds.left + textOffset - Scale(p, 7), bounds.top,
-                      bounds.right - Scale(p, 38), bounds.bottom};
-        SetTextColor(dc, color);
-        DrawTextW(dc, row.label.c_str(), -1, &textRect,
-                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX |
-                  (g_rtlLanguage ? DT_RTLREADING | DT_RIGHT : 0));
-        if (row.next || row.checked) {
-            HPEN pen = CreatePen(PS_SOLID, std::max(1, Scale(p, 1)), color);
-            HGDIOBJ old = SelectObject(dc, pen);
-            const int cx = p.width - Scale(p, 29);
-            const int cy = (bounds.top + bounds.bottom) / 2;
-            if (row.next) {
-                MoveToEx(dc, cx - Scale(p, 3), cy - Scale(p, 5), nullptr);
-                LineTo(dc, cx + Scale(p, 2), cy);
-                LineTo(dc, cx - Scale(p, 3), cy + Scale(p, 5));
-            } else {
-                MoveToEx(dc, cx - Scale(p, 6), cy, nullptr);
-                LineTo(dc, cx - Scale(p, 2), cy + Scale(p, 4));
-                LineTo(dc, cx + Scale(p, 6), cy - Scale(p, 5));
-            }
-            SelectObject(dc, old);
-            DeleteObject(pen);
-        }
+
+    for (size_t i = 0; i < std::size(kHotkeys); ++i) {
+        AppendMenuW(shortcuts, MF_STRING | (g_hotkeyChoice == static_cast<int>(i) ? MF_CHECKED : 0),
+                    kHotkeyMenuBase + static_cast<UINT>(i), kHotkeys[i].label);
     }
-    SelectObject(dc, oldFont);
-    BitBlt(target, 0, 0, p.width, p.height, dc, 0, 0, SRCCOPY);
-    SelectObject(dc, oldBitmap);
-    DeleteObject(bitmap);
-    DeleteDC(dc);
-    EndPaint(p.hwnd, &ps);
-}
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(shortcuts), g_text.shortcuts);
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (g_autostart ? MF_CHECKED : 0) |
+                (g_packaged ? MF_GRAYED : 0), kMenuAutostart, g_text.startup);
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kMenuExit, g_text.quit);
 
-int PopupHitTest(const PopupState& p, POINT point) {
-    for (size_t i = 0; i < p.visible.size(); ++i) {
-        const auto& row = p.visible[i];
-        if (PtInRect(&row.bounds, point) && !p.rows[row.index].separator &&
-            !p.rows[row.index].disabled) return static_cast<int>(i);
-    }
-    return -1;
-}
+    POINT point{};
+    GetCursorPos(&point);
+    MONITORINFO info{sizeof(info)};
+    HMONITOR monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+    GetMonitorInfoW(monitor, &info);
+    const bool rightSide = point.x > (info.rcWork.left + info.rcWork.right) / 2;
+    const bool bottomSide = point.y > (info.rcWork.top + info.rcWork.bottom) / 2;
 
-void SwitchPopupPage(PopupState& p, MenuPage page) {
-    p.page = page;
-    BuildPopupRows(p);
-    LayoutPopup(p);
-    PlacePopup(p);
-    InvalidateRect(p.hwnd, nullptr, FALSE);
-}
+    UINT flags = TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY |
+                 (rightSide ? TPM_RIGHTALIGN : TPM_LEFTALIGN) |
+                 (bottomSide ? TPM_BOTTOMALIGN : TPM_TOPALIGN);
+    if (g_rtlLanguage) flags |= TPM_LAYOUTRTL;
 
-void RunPopupAction(PopupState& p, int visibleIndex) {
-    if (visibleIndex < 0 || visibleIndex >= static_cast<int>(p.visible.size())) return;
-    const PopupRow row = p.rows[p.visible[visibleIndex].index];
-    if (row.separator || row.disabled) return;
-    if (row.action == kMenuShortcuts) { SwitchPopupPage(p, MenuPage::Shortcuts); return; }
-    if (row.action == kMenuBack) { SwitchPopupPage(p, MenuPage::Main); return; }
-    if (row.action == kMenuAutostart) {
+    // Required for reliably dismissing notification-area menus when the user
+    // clicks elsewhere; the subsequent WM_NULL prevents rapid reopen/close.
+    SetForegroundWindow(g_hwnd);
+    const UINT command = TrackPopupMenuEx(menu, flags, point.x, point.y, g_hwnd, nullptr);
+    PostMessageW(g_hwnd, WM_NULL, 0, 0);
+    DestroyMenu(menu); // Also destroys its attached shortcuts submenu.
+    showing = false;
+
+    if (command == kMenuExit) {
+        DestroyWindow(g_hwnd);
+    } else if (command == kMenuAutostart && !g_packaged) {
         if (SyncStartup(!g_autostart)) {
             g_autostart = !g_autostart;
             WriteSetting(L"AutoStart", g_autostart ? 1 : 0);
-            BuildPopupRows(p);
-            LayoutPopup(p);
-            InvalidateRect(p.hwnd, nullptr, FALSE);
         }
-        return;
+    } else if (command >= kHotkeyMenuBase &&
+               command < kHotkeyMenuBase + static_cast<UINT>(std::size(kHotkeys))) {
+        if (!ChangeHotkey(static_cast<int>(command - kHotkeyMenuBase)))
+            MessageBoxW(nullptr, g_text.occupied, L"PinTray", MB_OK | MB_ICONINFORMATION);
+    } else if (command == 0) {
+        NOTIFYICONDATAW data{};
+        data.cbSize = sizeof(data);
+        data.hWnd = g_hwnd;
+        data.uID = kTrayId;
+        Shell_NotifyIconW(NIM_SETFOCUS, &data);
     }
-    DestroyWindow(p.hwnd);
-    if (row.action == kMenuExit) DestroyWindow(g_hwnd);
-    else if (row.action >= kHotkeyMenuBase && row.action < kHotkeyMenuBase + std::size(kHotkeys)) {
-        if (!ChangeHotkey(static_cast<int>(row.action - kHotkeyMenuBase)))
-            MessageBoxW(nullptr, g_text.occupied, L"PinTray",
-                        MB_OK | MB_ICONINFORMATION);
-    }
-}
-
-LRESULT CALLBACK PopupWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    if (message == WM_NCCREATE) {
-        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        PopupState* state = reinterpret_cast<PopupState*>(create->lpCreateParams);
-        state->hwnd = hwnd;
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-        return TRUE;
-    }
-    auto* state = reinterpret_cast<PopupState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    if (!state) return DefWindowProcW(hwnd, message, wParam, lParam);
-    switch (message) {
-    case WM_ERASEBKGND: return 1;
-    case WM_PAINT: PaintPopup(*state); return 0;
-    case WM_ACTIVATE:
-        if (LOWORD(wParam) != WA_INACTIVE) {
-            state->hasBeenActivated = true;
-        } else if (state->hasBeenActivated) {
-            // The notification area can briefly change activation on right-click.
-            // Check focus asynchronously rather than destroying the popup in WM_ACTIVATE.
-            PostMessageW(hwnd, kPopupCheckFocus, 0, 0);
-        }
-        return 0;
-    case kPopupCheckFocus:
-        if (GetForegroundWindow() != hwnd) DestroyWindow(hwnd);
-        return 0;
-    case WM_MOUSEMOVE: {
-        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        int next = PopupHitTest(*state, point);
-        if (next != state->hover) { state->hover = next; InvalidateRect(hwnd, nullptr, FALSE); }
-        TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, hwnd, 0};
-        TrackMouseEvent(&track);
-        return 0;
-    }
-    case WM_MOUSELEAVE:
-        state->hover = -1;
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-    case WM_LBUTTONUP: {
-        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        RunPopupAction(*state, PopupHitTest(*state, point));
-        return 0;
-    }
-    case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE || wParam == VK_LEFT) {
-            if (state->page == MenuPage::Main) DestroyWindow(hwnd);
-            else SwitchPopupPage(*state, MenuPage::Main);
-            return 0;
-        }
-        if (wParam == VK_DOWN || wParam == VK_UP) {
-            if (state->visible.empty()) return 0;
-            int next = state->hover;
-            int delta = wParam == VK_DOWN ? 1 : -1;
-            for (size_t i = 0; i < state->visible.size(); ++i) {
-                next = (next + delta + static_cast<int>(state->visible.size())) %
-                       static_cast<int>(state->visible.size());
-                const auto& row = state->rows[state->visible[next].index];
-                if (!row.separator && !row.disabled) {
-                    state->hover = next;
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                    break;
-                }
-            }
-            return 0;
-        }
-        if (wParam == VK_RETURN || wParam == VK_SPACE || wParam == VK_RIGHT) {
-            if (state->hover >= 0) RunPopupAction(*state, state->hover);
-            return 0;
-        }
-        break;
-    case WM_DPICHANGED:
-        state->dpi = HIWORD(wParam);
-        if (state->font) DeleteObject(state->font);
-        state->font = CreateSystemMenuFont(state->dpi);
-        LayoutPopup(*state);
-        PlacePopup(*state);
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-    case WM_NCDESTROY:
-        if (state->font) DeleteObject(state->font);
-        if (g_popup == state) g_popup = nullptr;
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-        delete state;
-        return 0;
-    default: break;
-    }
-    return DefWindowProcW(hwnd, message, wParam, lParam);
-}
-
-void ShowMenu() {
-    if (g_popup) {
-        // Never toggle the existing popup for a duplicate tray notification.
-        if (IsWindow(g_popup->hwnd)) SetForegroundWindow(g_popup->hwnd);
-        return;
-    }
-    static bool registered = false;
-    if (!registered) {
-        WNDCLASSEXW klass{};
-        klass.cbSize = sizeof(klass);
-        klass.hInstance = g_instance;
-        klass.lpfnWndProc = PopupWindowProc;
-        klass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        klass.lpszClassName = L"PinTray.FluentPopup";
-        klass.style = CS_DROPSHADOW;
-        if (!RegisterClassExW(&klass)) return;
-        registered = true;
-    }
-    RefreshTooltip();
-    auto* state = new PopupState();
-    state->dark = UseDarkMenu();
-    GetCursorPos(&state->anchor);
-    HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-                               L"PinTray.FluentPopup", L"", WS_POPUP,
-                               state->anchor.x, state->anchor.y, 100, 100,
-                               g_hwnd, nullptr, g_instance, state);
-    if (!hwnd) { delete state; return; }
-    g_popup = state;
-    state->dpi = GetDpiForWindow(hwnd);
-    state->font = CreateSystemMenuFont(state->dpi);
-    const int dark = state->dark ? 1 : 0;
-    const int round = 2;          // DWMWCP_ROUND
-    const int transient = 3;      // DWMSBT_TRANSIENTWINDOW (Windows 11)
-    DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
-    DwmSetWindowAttribute(hwnd, 33, &round, sizeof(round));
-    DwmSetWindowAttribute(hwnd, 38, &transient, sizeof(transient));
-    BuildPopupRows(*state);
-    LayoutPopup(*state);
-    PlacePopup(*state); // SetWindowPos already shows it without activation.
-    SetForegroundWindow(hwnd);
-    SetFocus(hwnd);
 }
 
 // Lightweight, non-activating pin buttons owned by their target windows.
@@ -987,19 +638,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_THEMECHANGED:
         g_text = PinTrayLocale::Detect();
         g_rtlLanguage = IsRightToLeftLanguage();
-        if (g_popup) {
-            const UINT dpi = g_popup->dpi;
-            HFONT font = CreateSystemMenuFont(dpi);
-            if (font) {
-                if (g_popup->font) DeleteObject(g_popup->font);
-                g_popup->font = font;
-            }
-            g_popup->dark = UseDarkMenu();
-            BuildPopupRows(*g_popup);
-            LayoutPopup(*g_popup);
-            PlacePopup(*g_popup);
-            InvalidateRect(g_popup->hwnd, nullptr, FALSE);
-        }
         RequestBadgeRefresh();
         return 0;
     case WM_HOTKEY:
@@ -1015,7 +653,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         MoveBadgeWithWindow(reinterpret_cast<HWND>(wParam));
         return 0;
     case WM_DESTROY:
-        if (g_popup) DestroyWindow(g_popup->hwnd);
         ShutdownBadges();
         ClearOwnedPins();
         RemoveTrayIcon();

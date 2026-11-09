@@ -40,4 +40,6 @@ Require (-not $cpp.Contains('WH_MOUSE_LL')) 'obsolete click-anywhere mode is rem
 Require (-not $cpp.Contains('GetWindowTextW(')) 'window-title text is not allocated during toggles'
 Require ($cpp.Contains('DeleteObject(') -and $cpp.Contains('UnhookWinEvent(') -and $cpp.Contains('DestroyWindow(')) 'GDI, event hooks and overlays have cleanup paths'
 Require ($cpp.Contains('WS_EX_NOACTIVATE')) 'pin overlay does not steal application focus'
+Require ($cpp.Contains('TrackPopupMenuEx(')) 'tray context menu uses native Windows focus and dismissal'
+Require (-not $cpp.Contains('PopupWindowProc')) 'obsolete custom popup window has been removed'
 Write-Host "PinTray static regression checks passed ($v)."
