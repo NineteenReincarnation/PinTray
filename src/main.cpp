@@ -343,6 +343,19 @@ void DrawMenuGlyph(HDC dc, int kind, int x, int y, const PopupState& p, COLORREF
     DeleteObject(pen);
 }
 
+HFONT CreateSystemMenuFont(UINT dpi) {
+    NONCLIENTMETRICSW metrics{};
+    metrics.cbSize = sizeof(metrics);
+    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0)) {
+        LOGFONTW font = metrics.lfMenuFont;
+        font.lfHeight = MulDiv(font.lfHeight, static_cast<int>(dpi), 96);
+        return CreateFontIndirectW(&font);
+    }
+    return CreateFontW(-MulDiv(15, static_cast<int>(dpi), 96), 0, 0, 0, FW_NORMAL,
+                       FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0,
+                       CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+}
+
 void PaintPopup(PopupState& p) {
     PAINTSTRUCT ps{};
     HDC target = BeginPaint(p.hwnd, &ps);
@@ -542,9 +555,7 @@ LRESULT CALLBACK PopupWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
     case WM_DPICHANGED:
         state->dpi = HIWORD(wParam);
         if (state->font) DeleteObject(state->font);
-        state->font = CreateFontW(-Scale(*state, 15), 0, 0, 0, FW_NORMAL,
-                                  FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0,
-                                  CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable");
+        state->font = CreateSystemMenuFont(state->dpi);
         LayoutPopup(*state);
         PlacePopup(*state);
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -589,9 +600,7 @@ void ShowMenu() {
     if (!hwnd) { delete state; return; }
     g_popup = state;
     state->dpi = GetDpiForWindow(hwnd);
-    state->font = CreateFontW(-Scale(*state, 15), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                              DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, DEFAULT_PITCH,
-                              L"Segoe UI Variable");
+    state->font = CreateSystemMenuFont(state->dpi);
     const int dark = state->dark ? 1 : 0;
     const int round = 2;          // DWMWCP_ROUND
     const int transient = 3;      // DWMSBT_TRANSIENTWINDOW (Windows 11)
