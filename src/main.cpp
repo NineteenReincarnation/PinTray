@@ -295,6 +295,7 @@ struct BadgeEntry {
     bool pinned = false;
     bool dark = true;
     bool hover = false;
+    bool moveQueued = false;
 };
 std::vector<BadgeEntry> g_badges;
 HWINEVENTHOOK g_badgeHooks[6]{};
@@ -310,18 +311,26 @@ void RequestBadgeRefresh() {
 bool IsBadgeEligible(HWND target, DWORD* processId = nullptr) {
     if (!DescribeWindow(target) || IsIconic(target)) return false;
     const LONG_PTR style = GetWindowLongPtrW(target, GWL_STYLE);
-    // A title bar without system caption buttons has no safe native-looking
-    // insertion point. Such windows can still be pinned by the hotkey.
-    if (!(style & WS_CAPTION) || !(style & WS_SYSMENU)) return false;
+    // The edge tab does not depend on system caption buttons. Allow custom
+    // title bars, but skip child windows and immersive borderless fullscreen.
+    if (style & WS_CHILD) return false;
     RECT rect{};
     if (!GetWindowRect(target, &rect)) return false;
-    if (rect.right - rect.left < 220 || rect.bottom - rect.top < 70) return false;
+    if (rect.right - rect.left < 165 || rect.bottom - rect.top < 105) return false;
+    MONITORINFO monitor{sizeof(monitor)};
+    if (GetMonitorInfoW(MonitorFromWindow(target, MONITOR_DEFAULTTONEAREST), &monitor) &&
+        !(style & WS_CAPTION) &&
+        rect.left <= monitor.rcMonitor.left + 2 &&
+        rect.top <= monitor.rcMonitor.top + 2 &&
+        rect.right >= monitor.rcMonitor.right - 2 &&
+        rect.bottom >= monitor.rcMonitor.bottom - 2)
+        return false;
     if (processId) GetWindowThreadProcessId(target, processId);
     return true;
 }
 
-// No permanent tile: only the native-size pin glyph is visible in the caption.
-// A subtle hover background is drawn on demand, just like other caption buttons.
+// Tiny edge tab with a circular surface so it stays legible over wallpaper.
+// Gray/neutral when unpinned; blue when pinned. Only mouse hover changes its fill.
 void DrawBadge(HWND hwnd) {
     PAINTSTRUCT ps{};
     HDC dc = BeginPaint(hwnd, &ps);
@@ -334,39 +343,46 @@ void DrawBadge(HWND hwnd) {
     FillRect(dc, &rect, transparent);
     DeleteObject(transparent);
 
-    HWND target = reinterpret_cast<HWND>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     auto it = std::find_if(g_badges.begin(), g_badges.end(),
-        [hwnd](const BadgeEntry& p) { return p.badge == hwnd; });
+        [hwnd](const BadgeEntry& badge) { return badge.badge == hwnd; });
     const bool pinned = it != g_badges.end() && it->pinned;
     const bool dark = it != g_badges.end() ? it->dark : UseDarkMenu();
-    const bool hovering = it != g_badges.end() && it->hover;
-    if (hovering) {
-        // Match the understated Win11 caption hover treatment. Never draw
-        // the old square outline/background when the mouse is not over it.
-        HBRUSH highlight = CreateSolidBrush(dark ? RGB(69, 69, 69) : RGB(226, 226, 226));
-        FillRect(dc, &rect, highlight);
-        DeleteObject(highlight);
-    }
+    const bool hover = it != g_badges.end() && it->hover;
 
-    const COLORREF ink = pinned ? RGB(23, 164, 229)
-        : dark ? RGB(236, 236, 236) : RGB(35, 35, 35);
-    const int cx = w / 2;
-    const int cy = h / 2;
-    const int size = std::max(10, std::min(w, h) * 18 / 32);
-    const int unit = std::max(1, size / 14);
-    HPEN pen = CreatePen(PS_SOLID, std::max(1, size / 9), ink);
-    HGDIOBJ oldPen = SelectObject(dc, pen);
+    const COLORREF face = pinned
+        ? (hover ? RGB(0, 139, 224) : RGB(0, 116, 192))
+        : dark ? (hover ? RGB(85, 85, 85) : RGB(55, 55, 55))
+               : (hover ? RGB(225, 225, 225) : RGB(246, 246, 246));
+    const COLORREF outline = pinned ? RGB(41, 164, 236)
+        : dark ? RGB(123, 123, 123) : RGB(160, 160, 160);
+    const COLORREF ink = pinned || dark ? RGB(255, 255, 255) : RGB(50, 50, 50);
+
+    const int margin = std::max(1, std::min(w, h) / 14);
+    HBRUSH brush = CreateSolidBrush(face);
+    HPEN rim = CreatePen(PS_SOLID, 1, outline);
+    HGDIOBJ originalBrush = SelectObject(dc, brush);
+    HGDIOBJ originalPen = SelectObject(dc, rim);
+    Ellipse(dc, margin, margin, w - margin, h - margin);
+    SelectObject(dc, originalBrush);
+    SelectObject(dc, originalPen);
+    DeleteObject(brush);
+    DeleteObject(rim);
+
+    const int scale = std::max(1, std::min(w, h) / 18);
+    const int centerX = w / 2;
+    const int centerY = h / 2;
+    HPEN pen = CreatePen(PS_SOLID, std::max(2, std::min(w, h) / 12), ink);
+    originalPen = SelectObject(dc, pen);
     auto line = [&](int x1, int y1, int x2, int y2) {
-        MoveToEx(dc, cx + x1 * unit, cy + y1 * unit, nullptr);
-        LineTo(dc, cx + x2 * unit, cy + y2 * unit);
+        MoveToEx(dc, centerX + x1 * scale, centerY + y1 * scale, nullptr);
+        LineTo(dc, centerX + x2 * scale, centerY + y2 * scale);
     };
-    line(-5, -6, 5, -6);
-    line(-3, -6, -3, -1);
-    line(3, -6, 3, -1);
+    line(-5, -5, 5, -5);
+    line(-3, -5, -3, -1);
+    line(3, -5, 3, -1);
     line(-6, -1, 6, -1);
-    line(0, -1, 0, 7);
-    if (pinned) line(-2, 6, 2, 6);
-    SelectObject(dc, oldPen);
+    line(0, -1, 0, 6);
+    SelectObject(dc, originalPen);
     DeleteObject(pen);
     EndPaint(hwnd, &ps);
 }
@@ -414,47 +430,44 @@ LRESULT CALLBACK BadgeWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
     }
 }
 
-// Compute coordinates from Windows' actual native caption-button region.
-// DWM exposes this in window-relative coordinates, which remain usable with
-// different DPI, window borders and Win11 Explorer tabbed title bars.
-bool GetNativeBadgeRect(HWND target, RECT& placement) {
-    RECT wr{};
-    if (!GetWindowRect(target, &wr)) return false;
-    const UINT dpi = std::max(96u, GetDpiForWindow(target));
-    const int width = wr.right - wr.left;
-    const int height = wr.bottom - wr.top;
-    const int buttonWidth = std::max(30, GetSystemMetricsForDpi(SM_CXSIZE, dpi));
-    const int defaultHeight = std::max(28, GetSystemMetricsForDpi(SM_CYSIZE, dpi));
-    const int spacing = std::max(1, MulDiv(2, dpi, 96));
-    int x = 0, y = 0, buttonHeight = defaultHeight;
-    RECT buttons{};
-    const bool hasNativeBounds =
-        SUCCEEDED(DwmGetWindowAttribute(target, DWMWA_CAPTION_BUTTON_BOUNDS,
-                                        &buttons, sizeof(buttons))) &&
-        buttons.right > buttons.left && buttons.bottom > buttons.top &&
-        buttons.left >= 0 && buttons.top >= 0 &&
-        buttons.right <= width && buttons.bottom <= height / 2;
+// Anchor to the visible right edge, slightly below the title bar.
+// Let a small portion protrude when space permits. Near the screen edge,
+// pull the chip inside so it never disappears outside the monitor.
+bool GetEdgeBadgeRect(HWND target, RECT& placement) {
+    RECT frame{};
+    if (FAILED(DwmGetWindowAttribute(target, DWMWA_EXTENDED_FRAME_BOUNDS,
+                                    &frame, sizeof(frame))) &&
+        !GetWindowRect(target, &frame))
+        return false;
 
-    if (hasNativeBounds) {
-        buttonHeight = std::clamp(static_cast<int>(buttons.bottom - buttons.top),
-                                  MulDiv(26, dpi, 96), MulDiv(54, dpi, 96));
-        const bool buttonsOnLeft = buttons.left < width / 2;
-        x = wr.left + (buttonsOnLeft ? buttons.right + spacing
-                                    : buttons.left - buttonWidth - spacing);
-        y = wr.top + buttons.top +
-            (static_cast<int>(buttons.bottom - buttons.top) - buttonHeight) / 2;
-    } else {
-        // Some custom-title-bar applications do not report DWM caption bounds.
-        // Keep to the immediate left of the three standard system buttons.
-        x = wr.right - 4 * buttonWidth - spacing;
-        y = wr.top + MulDiv(IsZoomed(target) ? 0 : 4, dpi, 96);
-    }
-    // Never cover the system buttons, and avoid nonsensical placement on
-    // narrow/custom windows.
-    if (x < wr.left + MulDiv(120, dpi, 96) ||
-        x + buttonWidth > wr.right - buttonWidth ||
-        y < wr.top || y + buttonHeight > wr.bottom) return false;
-    placement = {x, y, x + buttonWidth, y + buttonHeight};
+    const UINT dpi = std::max(96u, GetDpiForWindow(target));
+    const int side = std::max(24, MulDiv(28, dpi, 96));
+    const int margin = std::max(2, MulDiv(5, dpi, 96));
+    const int upperOffset = MulDiv(58, dpi, 96);
+    if (frame.right - frame.left < side * 4 ||
+        frame.bottom - frame.top < upperOffset + side + margin)
+        return false;
+
+    const POINT edge{frame.right - 1, frame.top + upperOffset + side / 2};
+    MONITORINFO monitor{sizeof(monitor)};
+    if (!GetMonitorInfoW(MonitorFromPoint(edge, MONITOR_DEFAULTTONEAREST), &monitor))
+        return false;
+
+    RECT visible{};
+    if (!IntersectRect(&visible, &frame, &monitor.rcWork))
+        return false;
+    if (visible.right - visible.left < side || visible.bottom - visible.top < side)
+        return false;
+
+    int x = frame.right - side / 2; // half outside the right window edge
+    if (x + side > monitor.rcWork.right - margin)
+        x = std::min(frame.right - side - margin,
+                     static_cast<int>(monitor.rcWork.right) - side - margin);
+    int y = std::max(frame.top + upperOffset,
+                     static_cast<int>(monitor.rcWork.top) + margin);
+    if (x < visible.left || y + side > visible.bottom - margin)
+        return false;
+    placement = {x, y, x + side, y + side};
     return true;
 }
 
@@ -468,7 +481,7 @@ void RefreshBadges() {
     });
     if (initialPinCount != g_ownedPins.size()) RefreshTooltip();
 
-    // A persistent caption button on EVERY eligible top-level window.
+    // Persistent edge tabs on eligible top-level windows (never in caption buttons).
     // Enumeration is event-driven; there is no timer or constant polling.
     struct Target { HWND hwnd; DWORD pid; RECT placement; };
     std::vector<Target> targets;
@@ -478,7 +491,7 @@ void RefreshBadges() {
         DWORD pid = 0;
         RECT placement{};
         if (targets.size() < 128 && IsBadgeEligible(target, &pid) &&
-            GetNativeBadgeRect(target, placement)) {
+            GetEdgeBadgeRect(target, placement)) {
             targets.push_back({target, pid, placement});
         }
         return TRUE;
@@ -510,7 +523,7 @@ void RefreshBadges() {
             if (!badge) continue;
             SetWindowLongPtrW(badge, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(target));
             SetLayeredWindowAttributes(badge, kBadgeTransparency, 0, LWA_COLORKEY);
-            g_badges.push_back({target, pid, badge, pinned, dark, false});
+            g_badges.push_back({target, pid, badge, pinned, dark, false, false});
             SetWindowPos(badge, nullptr, place.left, place.top, w, h,
                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
         } else {
@@ -543,7 +556,7 @@ void MoveBadgeWithWindow(HWND target) {
     GetWindowThreadProcessId(target, &pid);
     RECT place{};
     if (pid != badge->pid || !IsBadgeEligible(target) ||
-        !GetNativeBadgeRect(target, place)) {
+        !GetEdgeBadgeRect(target, place)) {
         RequestBadgeRefresh();
         return;
     }
@@ -582,11 +595,14 @@ void CALLBACK OnBadgeWindowEvent(HWINEVENTHOOK, DWORD event, HWND target,
         if (target == GetAncestor(target, GA_ROOT)) RequestBadgeRefresh();
         return;
     }
-    // Movement events can be frequent: only react to windows we actually track.
-    if (event == EVENT_OBJECT_LOCATIONCHANGE &&
-        std::any_of(g_badges.begin(), g_badges.end(),
-                    [target](const BadgeEntry& b) { return b.target == target; })) {
-        PostMessageW(g_hwnd, kBadgeMove, reinterpret_cast<WPARAM>(target), 0);
+    // Coalesce drag events for each badge to avoid flooding the message queue.
+    if (event == EVENT_OBJECT_LOCATIONCHANGE) {
+        auto it = std::find_if(g_badges.begin(), g_badges.end(),
+            [target](const BadgeEntry& badge) { return badge.target == target; });
+        if (it != g_badges.end() && !it->moveQueued) {
+            it->moveQueued = PostMessageW(g_hwnd, kBadgeMove,
+                                         reinterpret_cast<WPARAM>(target), 0) != FALSE;
+        }
     }
 }
 
@@ -649,9 +665,16 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case kBadgeSync:
         RefreshBadges();
         return 0;
-    case kBadgeMove:
-        MoveBadgeWithWindow(reinterpret_cast<HWND>(wParam));
+    case kBadgeMove: {
+        HWND target = reinterpret_cast<HWND>(wParam);
+        auto it = std::find_if(g_badges.begin(), g_badges.end(),
+            [target](const BadgeEntry& badge) { return badge.target == target; });
+        if (it != g_badges.end()) {
+            it->moveQueued = false;
+            MoveBadgeWithWindow(target);
+        }
         return 0;
+    }
     case WM_DESTROY:
         ShutdownBadges();
         ClearOwnedPins();
