@@ -29,6 +29,7 @@ constexpr wchar_t kRunPath[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\R
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kPopupCheckFocus = WM_APP + 2;
 constexpr UINT kBadgeSync = WM_APP + 3;
+constexpr UINT kBadgeMove = WM_APP + 4;
 constexpr UINT kTrayId = 1;
 constexpr UINT kHotkeyMenuBase = 2000;
 constexpr UINT kMenuAutostart = 3000;
@@ -149,8 +150,10 @@ bool TogglePin(HWND hwnd) {
     const HWND destination = entry.topmost ? HWND_NOTOPMOST : HWND_TOPMOST;
     if (!SetWindowPos(hwnd, destination, 0, 0, 0, 0,
                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER)) return false;
-    if (entry.topmost) std::erase_if(g_ownedPins, [hwnd](const PinState& p) { return p.hwnd == hwnd; });
-    else g_ownedPins.push_back({hwnd, entry.pid});
+    // Drop a stale record before tracking a newly pinned HWND. Windows can
+    // reuse a handle after its previous window has been destroyed.
+    std::erase_if(g_ownedPins, [hwnd](const PinState& p) { return p.hwnd == hwnd; });
+    if (!entry.topmost) g_ownedPins.push_back({hwnd, entry.pid});
     return true;
 }
 
@@ -649,7 +652,7 @@ struct BadgeEntry {
     bool hover = false;
 };
 std::vector<BadgeEntry> g_badges;
-HWINEVENTHOOK g_badgeHooks[4]{};
+HWINEVENTHOOK g_badgeHooks[5]{};
 bool g_badgeRefreshQueued = false;
 constexpr wchar_t kBadgeClass[] = L"PinTray.WindowBadge";
 constexpr COLORREF kBadgeTransparency = RGB(255, 0, 255);
@@ -894,6 +897,32 @@ void RefreshBadges() {
     }
 }
 
+// During window drags, avoid a full EnumWindows + badge rebuild for
+// every location-change event; just move the existing non-activating button.
+void MoveBadgeWithWindow(HWND target) {
+    auto badge = std::find_if(g_badges.begin(), g_badges.end(),
+        [target](const BadgeEntry& b) { return b.target == target; });
+    if (badge == g_badges.end()) return;
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(target, &pid);
+    RECT place{};
+    if (pid != badge->pid || !IsBadgeEligible(target) ||
+        !GetNativeBadgeRect(target, place)) {
+        RequestBadgeRefresh();
+        return;
+    }
+    RECT current{};
+    if (!GetWindowRect(badge->badge, &current) ||
+        current.left != place.left || current.top != place.top ||
+        current.right - current.left != place.right - place.left ||
+        current.bottom - current.top != place.bottom - place.top) {
+        SetWindowPos(badge->badge, nullptr, place.left, place.top,
+                     place.right - place.left, place.bottom - place.top,
+                     SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER);
+    }
+}
+
 void CALLBACK OnBadgeWindowEvent(HWINEVENTHOOK, DWORD event, HWND target,
                                   LONG object, LONG child, DWORD, DWORD) {
     if (event == EVENT_SYSTEM_FOREGROUND) {
@@ -901,6 +930,16 @@ void CALLBACK OnBadgeWindowEvent(HWINEVENTHOOK, DWORD event, HWND target,
         return;
     }
     if (object != OBJID_WINDOW || child != CHILDID_SELF || !target) return;
+    if (event == EVENT_OBJECT_DESTROY) {
+        // Prune before Win32 can recycle the HWND for another window.
+        const auto removed = std::erase_if(g_ownedPins,
+            [target](const PinState& p) { return p.hwnd == target; });
+        const bool hadBadge = std::any_of(g_badges.begin(), g_badges.end(),
+            [target](const BadgeEntry& b) { return b.target == target; });
+        if (removed || hadBadge) RequestBadgeRefresh();
+        if (removed) RefreshTooltip();
+        return;
+    }
     // A newly shown/hidden root window can change the set of visible badges.
     if (event == EVENT_OBJECT_SHOW || event == EVENT_OBJECT_HIDE ||
         event == EVENT_SYSTEM_MINIMIZESTART || event == EVENT_SYSTEM_MINIMIZEEND) {
@@ -911,7 +950,7 @@ void CALLBACK OnBadgeWindowEvent(HWINEVENTHOOK, DWORD event, HWND target,
     if (event == EVENT_OBJECT_LOCATIONCHANGE &&
         std::any_of(g_badges.begin(), g_badges.end(),
                     [target](const BadgeEntry& b) { return b.target == target; })) {
-        RequestBadgeRefresh();
+        PostMessageW(g_hwnd, kBadgeMove, reinterpret_cast<WPARAM>(target), 0);
     }
 }
 
@@ -931,6 +970,8 @@ void InitializeBadges() {
     g_badgeHooks[2] = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE,
                                       nullptr, OnBadgeWindowEvent, 0, 0, flags);
     g_badgeHooks[3] = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
+                                      nullptr, OnBadgeWindowEvent, 0, 0, flags);
+    g_badgeHooks[4] = SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY,
                                       nullptr, OnBadgeWindowEvent, 0, 0, flags);
     RequestBadgeRefresh();
 }
@@ -976,6 +1017,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
     case kBadgeSync:
         RefreshBadges();
+        return 0;
+    case kBadgeMove:
+        MoveBadgeWithWindow(reinterpret_cast<HWND>(wParam));
         return 0;
     case WM_DESTROY:
         if (g_popup) DestroyWindow(g_popup->hwnd);
