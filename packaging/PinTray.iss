@@ -10,8 +10,8 @@ AppPublisher=NineteenReincarnation
 DefaultDirName={localappdata}\Programs\{#AppName}
 DefaultGroupName={#AppName}
 PrivilegesRequired=lowest
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64os
+ArchitecturesInstallIn64BitMode=x64os
 WizardStyle=modern
 DisableProgramGroupPage=yes
 OutputDir=..\artifacts\installer
@@ -31,4 +31,4 @@ Name: "{autoprograms}\PinTray"; Filename: "{app}\{#AppExe}"
 Filename: "{app}\{#AppExe}"; Description: "Launch PinTray"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-Filename: "{sys}\reg.exe"; Parameters: "delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v PinTray /f"; Flags: runhidden
+Filename: "{sys}\reg.exe"; Parameters: "delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v PinTray /f"; Flags: runhidden; RunOnceId: "PinTrayRemoveAutostart"

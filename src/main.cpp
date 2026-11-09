@@ -293,7 +293,7 @@ void ShowMenu() {
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(windowsMenu), L"窗口列表");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (g_ownedPins.empty() ? MF_GRAYED : 0),
-                kMenuClear, L"取消全部置顶");
+                kMenuClear, L"取消 PinTray 设置的全部置顶");
     AppendMenuW(menu, MF_STRING | (g_autostart ? MF_CHECKED : 0) |
                 (g_packaged ? MF_GRAYED : 0), kMenuAutostart, L"开机自动启动");
     for (size_t i = 0; i < std::size(kHotkeys); ++i) {
