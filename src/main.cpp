@@ -609,6 +609,8 @@ struct BadgeEntry {
     HWND target = nullptr;
     DWORD pid = 0;
     HWND badge = nullptr;
+    bool pinned = false;
+    bool dark = true;
 };
 std::vector<BadgeEntry> g_badges;
 HWINEVENTHOOK g_badgeHooks[4]{};
@@ -743,6 +745,7 @@ void RefreshBadges() {
         return !keep;
     });
 
+    const bool dark = UseDarkMenu();
     for (const auto& [target, pid] : targets) {
         RECT rect{};
         if (!IsBadgeEligible(target, nullptr, &rect)) continue;
@@ -762,18 +765,24 @@ void RefreshBadges() {
             if (!badge) continue;
             SetWindowLongPtrW(badge, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(target));
             SetLayeredWindowAttributes(badge, kBadgeTransparency, 0, LWA_COLORKEY);
-            g_badges.push_back({target, pid, badge});
+            g_badges.push_back({target, pid, badge,
+                (GetWindowLongPtrW(target, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0, dark});
             SetWindowPos(badge, nullptr, x, y, size, size,
                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
         } else {
             RECT current{};
-            if (!GetWindowRect(found->badge, &current) ||
+            const bool changedGeometry = !GetWindowRect(found->badge, &current) ||
                 current.left != x || current.top != y ||
-                current.right - current.left != size || current.bottom - current.top != size) {
+                current.right - current.left != size || current.bottom - current.top != size;
+            const bool pinned = (GetWindowLongPtrW(target, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+            if (changedGeometry) {
                 SetWindowPos(found->badge, nullptr, x, y, size, size,
                     SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
             }
-            InvalidateRect(found->badge, nullptr, FALSE);
+            if (changedGeometry || found->pinned != pinned || found->dark != dark)
+                InvalidateRect(found->badge, nullptr, FALSE);
+            found->pinned = pinned;
+            found->dark = dark;
         }
     }
 }
