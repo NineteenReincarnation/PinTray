@@ -18,6 +18,7 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "gdi32.lib")
 
 namespace {
 constexpr wchar_t kClassName[] = L"NineteenReincarnation.PinTray";
