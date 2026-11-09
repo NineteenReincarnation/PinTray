@@ -27,6 +27,7 @@ constexpr wchar_t kRunPath[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\R
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kSelectDone = WM_APP + 2;
 constexpr UINT kSelectCancel = WM_APP + 3;
+constexpr UINT kPopupCheckFocus = WM_APP + 4;
 constexpr UINT kTrayId = 1;
 constexpr UINT kWindowMenuBase = 1000;
 constexpr UINT kHotkeyMenuBase = 2000;
@@ -295,6 +296,7 @@ struct PopupState {
     UINT dpi = 96;
     int width = 0, height = 0, hover = -1, scroll = 0;
     bool dark = true;
+    bool hasBeenActivated = false;
     HFONT font = nullptr;
     std::vector<PopupRow> rows;
     std::vector<DisplayRow> visible;
@@ -599,7 +601,16 @@ LRESULT CALLBACK PopupWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: PaintPopup(*state); return 0;
     case WM_ACTIVATE:
-        if (LOWORD(wParam) == WA_INACTIVE) DestroyWindow(hwnd);
+        if (LOWORD(wParam) != WA_INACTIVE) {
+            state->hasBeenActivated = true;
+        } else if (state->hasBeenActivated) {
+            // The notification area can briefly change activation on right-click.
+            // Check focus asynchronously rather than destroying the popup in WM_ACTIVATE.
+            PostMessageW(hwnd, kPopupCheckFocus, 0, 0);
+        }
+        return 0;
+    case kPopupCheckFocus:
+        if (GetForegroundWindow() != hwnd) DestroyWindow(hwnd);
         return 0;
     case WM_MOUSEMOVE: {
         POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -675,7 +686,8 @@ LRESULT CALLBACK PopupWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
 
 void ShowMenu() {
     if (g_popup) {
-        DestroyWindow(g_popup->hwnd);
+        // Never toggle the existing popup for a duplicate tray notification.
+        if (IsWindow(g_popup->hwnd)) SetForegroundWindow(g_popup->hwnd);
         return;
     }
     static bool registered = false;
@@ -712,8 +724,7 @@ void ShowMenu() {
     DwmSetWindowAttribute(hwnd, 38, &transient, sizeof(transient));
     BuildPopupRows(*state);
     LayoutPopup(*state);
-    PlacePopup(*state);
-    ShowWindow(hwnd, SW_SHOW);
+    PlacePopup(*state); // SetWindowPos already shows it without activation.
     SetForegroundWindow(hwnd);
     SetFocus(hwnd);
 }
@@ -723,8 +734,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case kTrayMessage: {
         const UINT action = LOWORD(lParam);
-        if (action == WM_CONTEXTMENU || action == WM_RBUTTONUP) ShowMenu();
-        else if (action == NIN_SELECT || action == NIN_KEYSELECT || action == WM_LBUTTONUP) StartSelecting();
+        // NOTIFYICON_VERSION_4 delivers context-menu and selection events.
+        // Handling legacy button-up messages here causes duplicate toggles.
+        if (action == WM_CONTEXTMENU) ShowMenu();
+        else if (action == NIN_SELECT || action == NIN_KEYSELECT) StartSelecting();
         return 0;
     }
     case WM_HOTKEY:
