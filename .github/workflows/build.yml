@@ -79,8 +79,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $exe = 'artifacts/portable/PinTray.exe'
           $version = (Get-Item $exe).VersionInfo.ProductVersion.Trim()
-          if ($version -notmatch '^\d+\.\d+\.\d+
-) { throw "Invalid project version: $version" }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid project version: $version" }
           $installer = "artifacts/installer/PinTray-Setup-$version-win-x64.exe"
           $portable = "artifacts/PinTray-Portable-$version-win-x64.exe"
           if (!(Test-Path $installer)) { throw "Installer version doesn't match executable: $version" }
