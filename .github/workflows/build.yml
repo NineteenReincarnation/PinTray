@@ -24,6 +24,10 @@ jobs:
           rc /nologo /fo artifacts\build\PinTray.res src\PinTray.rc
           cl /nologo /std:c++20 /utf-8 /O1 /GL /MT /EHsc /W4 /D_WIN32_WINNT=0x0A00 src\main.cpp artifacts\build\PinTray.res /Foartifacts\build\ /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF /MANIFEST:NO /OUT:artifacts\publish\PinTray.exe user32.lib shell32.lib advapi32.lib dwmapi.lib
 
+      - name: Review version and core invariants
+        shell: pwsh
+        run: ./tests/VerifyPinTray.ps1
+
       - name: Upload portable build
         uses: actions/upload-artifact@v4
         with:
