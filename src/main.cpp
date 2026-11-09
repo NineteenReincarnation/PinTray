@@ -21,8 +21,8 @@
 
 namespace {
 constexpr wchar_t kClassName[] = L"NineteenReincarnation.PinTray";
-constexpr wchar_t kSettingsPath[] = L"Software\NineteenReincarnation\PinTray";
-constexpr wchar_t kRunPath[] = L"Software\Microsoft\Windows\CurrentVersion\Run";
+constexpr wchar_t kSettingsPath[] = L"Software\\NineteenReincarnation\\PinTray";
+constexpr wchar_t kRunPath[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kSelectDone = WM_APP + 2;
 constexpr UINT kSelectCancel = WM_APP + 3;
@@ -368,7 +368,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_instance = instance;
-    g_mutex = CreateMutexW(nullptr, TRUE, L"Local\NineteenReincarnation.PinTray.Singleton");
+    g_mutex = CreateMutexW(nullptr, TRUE, L"Local\\NineteenReincarnation.PinTray.Singleton");
     if (!g_mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
         if (g_mutex) CloseHandle(g_mutex);
         return 0;
